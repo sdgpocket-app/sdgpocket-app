@@ -251,17 +251,32 @@ async function loadAll(){
   }catch(e){ console.error(e); showToast('No se pudo conectar a la base de datos', true); }
   state.loaded = true;
   // Si ya hay una sesión de administrador activa (login previo), entra directo sin pedir credenciales otra vez.
-  const { data: { session } } = await sb.auth.getSession();
-  if(session){ await reloadPrivateData(); state.auth='admin'; state.tab='inicio'; }
+  try{
+    const { data: { session } } = await sb.auth.getSession();
+    if(session){ await reloadPrivateData(); state.auth='admin'; state.tab='inicio'; }
+  }catch(e){ console.error('Sesión inválida, se pide login de nuevo', e); }
   render();
 }
 async function reloadPrivateData(){
-  const [p,l,se,ex] = await Promise.all([
-    safeGet('payments'), safeGet('leads'), safeGetObj('settings'), safeGet('expenses')
-  ]);
-  state.payments=p||[]; state.leads=l||[]; state.settings=se||{}; state.expenses=ex||[];
+  try{
+    const [p,l,se,ex] = await Promise.all([
+      safeGet('payments'), safeGet('leads'), safeGetObj('settings'), safeGet('expenses')
+    ]);
+    state.payments=p||[]; state.leads=l||[]; state.settings=se||{}; state.expenses=ex||[];
+  }catch(e){ console.error(e); showToast('No se pudieron cargar los datos privados', true); }
 }
 function tableFor(key){ return SHARED_KEYS.has(key) ? 'kv_shared' : 'kv_private'; }
+/* Guardado seguro: SIEMPRE relee la versión más reciente de la base de datos antes de
+   modificar y guardar, en vez de confiar en lo que ya está en pantalla (state.xxx).
+   Esto evita que una pantalla desactualizada sobrescriba y borre datos guardados por
+   otro dispositivo o en otro momento. */
+async function saveListSafely(key, mutateFn){
+  const fresh = (await safeGet(key)) || [];
+  mutateFn(fresh);
+  await saveKey(key, fresh);
+  state[key] = fresh;
+  return fresh;
+}
 async function safeGet(key){
   try{
     const { data, error } = await sb.from(tableFor(key)).select('value').eq('key', key).maybeSingle();
@@ -508,8 +523,7 @@ async function checkStudentPin(){
   if(p._isNew){
     p.pinHash = await hashPin(state.pinBuffer);
     delete p._isNew;
-    state.students.push(p);
-    await saveKey('students', state.students);
+    await saveListSafely('students', arr=>arr.push(p));
     state.currentProfile = p;
     state.auth='student'; state.tab='perfil'; state.pinBuffer='';
     render();
@@ -676,9 +690,10 @@ const BADGES = [
   {id:'hundred', icon:'👑', label:'100 clases', test:(total,streak,maxDay)=>total>=100},
 ];
 async function setRestDay(idx, dow){
-  const s = state.students.find(x=>x.id===idx); if(!s) return;
-  s.restDay = (s.restDay===dow) ? null : dow;
-  await saveKey('students', state.students);
+  await saveListSafely('students', arr=>{
+    const s = arr.find(x=>x.id===idx); if(!s) return;
+    s.restDay = (s.restDay===dow) ? null : dow;
+  });
   render();
 }
 function newStudentsByMonth(n){
@@ -900,28 +915,29 @@ async function saveStudent(id, isNew){
     pinHash,
     role:'student'
   };
-  if(isNew){ state.students.push(data); } else { const idx=state.students.findIndex(s=>s.id===id); state.students[idx]=data; }
-  await saveKey('students', state.students);
+  if(isNew){ await saveListSafely('students', arr=>arr.push(data)); }
+  else { await saveListSafely('students', arr=>{ const idx=arr.findIndex(s=>s.id===id); if(idx>=0) arr[idx]=data; }); }
   closeModal(); render(); showToast('Alumno guardado');
 }
 async function archiveStudent(id){
-  const idx=state.students.findIndex(s=>s.id===id); if(idx<0) return;
-  state.students[idx].archived = true;
-  await saveKey('students', state.students);
+  await saveListSafely('students', arr=>{
+    const idx=arr.findIndex(s=>s.id===id); if(idx>=0) arr[idx].archived = true;
+  });
   closeModal(); render(); showToast('Alumno enviado a la papelera');
 }
 async function restoreStudent(id){
-  const idx=state.students.findIndex(s=>s.id===id); if(idx<0) return;
-  state.students[idx].archived = false;
-  await saveKey('students', state.students);
+  await saveListSafely('students', arr=>{
+    const idx=arr.findIndex(s=>s.id===id); if(idx>=0) arr[idx].archived = false;
+  });
   closeModal(); render(); showToast('Alumno restaurado');
 }
 async function deleteStudent(id){
   if(!confirm('Esto borra al alumno y todo su historial de forma permanente, sin poder recuperarlo. ¿Continuar?')) return;
-  state.students=state.students.filter(s=>s.id!==id);
-  state.payments=state.payments.filter(p=>p.studentId!==id);
-  state.attendance=state.attendance.filter(a=>a.studentId!==id);
-  await Promise.all([saveKey('students',state.students), saveKey('payments',state.payments), saveKey('attendance',state.attendance)]);
+  await Promise.all([
+    saveListSafely('students', arr=>{ const idx=arr.findIndex(s=>s.id===id); if(idx>=0) arr.splice(idx,1); }),
+    saveListSafely('payments', arr=>{ for(let i=arr.length-1;i>=0;i--){ if(arr[i].studentId===id) arr.splice(i,1); } }),
+    saveListSafely('attendance', arr=>{ for(let i=arr.length-1;i>=0;i--){ if(arr[i].studentId===id) arr.splice(i,1); } })
+  ]);
   closeModal(); render(); showToast('Alumno eliminado definitivamente');
 }
 function openStudentDetail(id){
@@ -1010,11 +1026,13 @@ function shiftMonth(n){ const d=new Date(state.monthCursor); d.setMonth(d.getMon
 async function setPayment(studentId,mKey,status){
   let amount='';
   if(status==='pagado'){ amount=prompt('Monto pagado (MXN):',''); if(amount===null) return; }
-  let p=state.payments.find(x=>x.studentId===studentId && x.month===mKey);
-  if(!p){ p={id:uid(), studentId, month:mKey}; state.payments.push(p); }
-  p.status=status; p.amount = amount!=='' ? Number(amount) : (p.amount||0);
-  p.paidDate = status==='pagado' ? new Date().toISOString().slice(0,10) : p.paidDate;
-  await saveKey('payments', state.payments); render(); showToast('Pago actualizado');
+  await saveListSafely('payments', arr=>{
+    let p=arr.find(x=>x.studentId===studentId && x.month===mKey);
+    if(!p){ p={id:uid(), studentId, month:mKey}; arr.push(p); }
+    p.status=status; p.amount = amount!=='' ? Number(amount) : (p.amount||0);
+    p.paidDate = status==='pagado' ? new Date().toISOString().slice(0,10) : p.paidDate;
+  });
+  render(); showToast('Pago actualizado');
 }
 
 /* ---- Finanzas: gastos fijos y otros, balance ---- */
@@ -1057,12 +1075,13 @@ async function saveExpense(){
   const concept=document.getElementById('e_concept').value.trim();
   const amount=document.getElementById('e_amount').value;
   if(!concept || !amount){ showToast('Completa concepto y monto', true); return; }
-  state.expenses.push({id:uid(), concept, amount:Number(amount), category:document.getElementById('e_category').value, month:monthKey(state.monthCursor)});
-  await saveKey('expenses', state.expenses); closeModal(); render(); showToast('Gasto guardado');
+  const category=document.getElementById('e_category').value, month=monthKey(state.monthCursor);
+  await saveListSafely('expenses', arr=>arr.push({id:uid(), concept, amount:Number(amount), category, month}));
+  closeModal(); render(); showToast('Gasto guardado');
 }
 async function deleteExpense(id){
-  state.expenses=state.expenses.filter(e=>e.id!==id);
-  await saveKey('expenses', state.expenses); render();
+  await saveListSafely('expenses', arr=>{ const idx=arr.findIndex(e=>e.id===id); if(idx>=0) arr.splice(idx,1); });
+  render();
 }
 
 /* ============ ASISTENCIA (ADMIN) ============ */
@@ -1095,8 +1114,7 @@ async function markAttendance(studentId){
   const todayStr=new Date().toISOString().slice(0,10);
   const countToday=state.attendance.filter(a=>a.studentId===studentId && a.date===todayStr).length;
   if(countToday>=MAX_SESSIONS_PER_DAY){ showToast('Ya alcanzó el máximo de '+MAX_SESSIONS_PER_DAY+' clases hoy'); return; }
-  state.attendance.push({id:uid(), studentId, date:todayStr, className:'Clase general'});
-  await saveKey('attendance', state.attendance);
+  await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:'Clase general'}));
   const s=state.students.find(x=>x.id===studentId);
   showToast((s?s.name:'Alumno')+' registrado ✓ ('+(countToday+1)+'/'+MAX_SESSIONS_PER_DAY+')'); render();
 }
@@ -1131,7 +1149,7 @@ async function handleScanHit(studentId){
   if(!s){ showToast('Código no reconocido', true); setTimeout(()=>requestAnimationFrame(scanLoop),900); return; }
   const countToday=state.attendance.filter(a=>a.studentId===studentId && a.date===todayStr).length;
   if(countToday>=MAX_SESSIONS_PER_DAY){ showToast(s.name+' ya alcanzó el máximo de '+MAX_SESSIONS_PER_DAY+' clases hoy'); }
-  else{ state.attendance.push({id:uid(), studentId, date:todayStr, className:'Clase general'}); await saveKey('attendance', state.attendance); showToast(s.name+' registrado ✓ ('+(countToday+1)+'/'+MAX_SESSIONS_PER_DAY+')'); }
+  else{ await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:'Clase general'})); showToast(s.name+' registrado ✓ ('+(countToday+1)+'/'+MAX_SESSIONS_PER_DAY+')'); }
   setTimeout(()=>{ if(state.scanMode) requestAnimationFrame(scanLoop); }, 1200);
 }
 function stopScan(){ if(state.scanStream){ state.scanStream.getTracks().forEach(t=>t.stop()); state.scanStream=null; } }
@@ -1161,12 +1179,13 @@ function openLeadForm(){
 async function saveLead(){
   const name=document.getElementById('l_name').value.trim();
   if(!name){ showToast('Escribe un nombre', true); return; }
-  state.leads.push({id:uid(), name, phone:document.getElementById('l_phone').value.trim(), notes:document.getElementById('l_notes').value.trim(), date:new Date().toISOString().slice(0,10), status:'nuevo'});
-  await saveKey('leads', state.leads); closeModal(); render(); showToast('Lead guardado');
+  const phone=document.getElementById('l_phone').value.trim(), notes=document.getElementById('l_notes').value.trim();
+  await saveListSafely('leads', arr=>arr.push({id:uid(), name, phone, notes, date:new Date().toISOString().slice(0,10), status:'nuevo'}));
+  closeModal(); render(); showToast('Lead guardado');
 }
 async function setLeadStatus(id,status){
-  const l=state.leads.find(x=>x.id===id);
-  if(l){ l.status=status; await saveKey('leads', state.leads); render(); }
+  await saveListSafely('leads', arr=>{ const l=arr.find(x=>x.id===id); if(l) l.status=status; });
+  render();
 }
 
 /* ============ MURO (ADMIN) ============ */
@@ -1226,12 +1245,13 @@ function handlePostPhoto(input){
 async function savePost(){
   const title=document.getElementById('p_title').value.trim();
   if(!title){ showToast('Escribe un título', true); return; }
-  state.posts.push({id:uid(), type:document.getElementById('p_type').value, title, body:document.getElementById('p_body').value.trim(), photo:window._postPhoto||'', date:new Date().toISOString().slice(0,10), reactions:{likes:[],asistire:[]}});
-  await saveKey('posts', state.posts); closeModal(); render(); showToast('Publicado en el muro');
+  const type=document.getElementById('p_type').value, body=document.getElementById('p_body').value.trim(), photo=window._postPhoto||'';
+  await saveListSafely('posts', arr=>arr.push({id:uid(), type, title, body, photo, date:new Date().toISOString().slice(0,10), reactions:{likes:[],asistire:[]}}));
+  closeModal(); render(); showToast('Publicado en el muro');
 }
 async function deletePost(id){
-  state.posts=state.posts.filter(p=>p.id!==id);
-  await saveKey('posts', state.posts); render();
+  await saveListSafely('posts', arr=>{ const idx=arr.findIndex(p=>p.id===id); if(idx>=0) arr.splice(idx,1); });
+  render();
 }
 
 /* ============ PERFIL ALUMNO ============ */
@@ -1348,14 +1368,17 @@ function handleMyPhoto(input){
   reader.readAsDataURL(file);
 }
 async function saveMyProfile(){
-  const idx = state.students.findIndex(x=>x.id===state.currentProfile.id);
-  if(idx<0) return;
-  state.students[idx].phone = document.getElementById('my_phone').value.trim();
-  state.students[idx].weight = document.getElementById('my_weight').value;
-  state.students[idx].titles = document.getElementById('my_titles').value.trim();
-  state.students[idx].photo = window._myPhoto || state.students[idx].photo;
-  await saveKey('students', state.students);
-  state.currentProfile = state.students[idx];
+  const phone = document.getElementById('my_phone').value.trim();
+  const weight = document.getElementById('my_weight').value;
+  const titles = document.getElementById('my_titles').value.trim();
+  const photo = window._myPhoto;
+  const myId = state.currentProfile.id;
+  const fresh = await saveListSafely('students', arr=>{
+    const idx = arr.findIndex(x=>x.id===myId); if(idx<0) return;
+    arr[idx].phone = phone; arr[idx].weight = weight; arr[idx].titles = titles;
+    arr[idx].photo = photo || arr[idx].photo;
+  });
+  state.currentProfile = fresh.find(x=>x.id===myId) || state.currentProfile;
   closeModal(); render(); showToast('Datos actualizados');
 }
 
@@ -1394,12 +1417,13 @@ function openPeerProfile(id){
   document.body.appendChild(modal);
 }
 async function toggleKudos(id){
-  const idx = state.students.findIndex(x=>x.id===id); if(idx<0) return;
   const myId = state.currentProfile.id;
-  if(!state.students[idx].kudos) state.students[idx].kudos=[];
-  const i = state.students[idx].kudos.indexOf(myId);
-  if(i>=0) state.students[idx].kudos.splice(i,1); else state.students[idx].kudos.push(myId);
-  await saveKey('students', state.students);
+  await saveListSafely('students', arr=>{
+    const idx = arr.findIndex(x=>x.id===id); if(idx<0) return;
+    if(!arr[idx].kudos) arr[idx].kudos=[];
+    const i = arr[idx].kudos.indexOf(myId);
+    if(i>=0) arr[idx].kudos.splice(i,1); else arr[idx].kudos.push(myId);
+  });
   closeModal(); openPeerProfile(id);
 }
 
@@ -1422,13 +1446,15 @@ function renderMuroAlumno(c){
   `;
 }
 async function toggleReaction(postId, kind){
-  const p = state.posts.find(x=>x.id===postId); if(!p) return;
-  if(!p.reactions) p.reactions={likes:[],asistire:[]};
-  if(!p.reactions[kind]) p.reactions[kind]=[];
   const myId = state.currentProfile.id;
-  const idx = p.reactions[kind].indexOf(myId);
-  if(idx>=0) p.reactions[kind].splice(idx,1); else p.reactions[kind].push(myId);
-  await saveKey('posts', state.posts); render();
+  await saveListSafely('posts', arr=>{
+    const p = arr.find(x=>x.id===postId); if(!p) return;
+    if(!p.reactions) p.reactions={likes:[],asistire:[]};
+    if(!p.reactions[kind]) p.reactions[kind]=[];
+    const idx = p.reactions[kind].indexOf(myId);
+    if(idx>=0) p.reactions[kind].splice(idx,1); else p.reactions[kind].push(myId);
+  });
+  render();
 }
 
 /* ============ BUZÓN ALUMNO ============ */
@@ -1464,8 +1490,9 @@ async function sendComment(){
   if(!msg){ showToast('Escribe algo primero', true); return; }
   const category = document.getElementById('c_cat').value;
   const topic = category==='tecnico' ? document.getElementById('c_topic').value : '';
-  state.comments.push({id:uid(), authorId:state.currentProfile.id, authorName:state.currentProfile.name, category, topic, message:msg, date:new Date().toISOString().slice(0,10)});
-  await saveKey('comments', state.comments); render(); showToast('Comentario enviado');
+  const authorId=state.currentProfile.id, authorName=state.currentProfile.name;
+  await saveListSafely('comments', arr=>arr.push({id:uid(), authorId, authorName, category, topic, message:msg, date:new Date().toISOString().slice(0,10)}));
+  render(); showToast('Comentario enviado');
 }
 function openBuzonQuickCompose(){
   const modal=document.createElement('div'); modal.className='overlay';
@@ -1489,8 +1516,8 @@ async function sendQuickComment(){
   if(!msg){ showToast('Escribe algo primero', true); return; }
   const category = document.getElementById('qc_cat').value;
   const topic = category==='tecnico' ? document.getElementById('qc_topic').value : '';
-  state.comments.push({id:uid(), authorId:state.currentProfile.id, authorName:state.currentProfile.name, category, topic, message:msg, date:new Date().toISOString().slice(0,10)});
-  await saveKey('comments', state.comments);
+  const authorId=state.currentProfile.id, authorName=state.currentProfile.name;
+  await saveListSafely('comments', arr=>arr.push({id:uid(), authorId, authorName, category, topic, message:msg, date:new Date().toISOString().slice(0,10)}));
   closeModal(); showToast('Comentario enviado');
   if(state.tab==='buzon') render();
 }
