@@ -13,7 +13,23 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
+<script>
+(function(){
+  var jsQRUrls = [
+    'https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js',
+    'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js',
+    'https://unpkg.com/jsqr@1.4.0/dist/jsQR.js'
+  ];
+  function tryLoad(i){
+    if(i >= jsQRUrls.length){ console.error('No se pudo cargar el lector de QR desde ninguna fuente.'); return; }
+    var s = document.createElement('script');
+    s.src = jsQRUrls[i];
+    s.onerror = function(){ tryLoad(i+1); };
+    document.head.appendChild(s);
+  }
+  tryLoad(0);
+})();
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
@@ -1257,12 +1273,16 @@ function renderScanArea(){
   const area=document.getElementById('attArea');
   area.innerHTML=`<div class="scan-wrap"><video id="scanVideo" playsinline muted autoplay></video><div class="scan-frame"></div></div>
     <div class="scan-msg" id="scanMsg">Apunta la cámara al código QR del alumno</div><canvas id="scanCanvas" style="display:none;"></canvas>`;
-  if(typeof jsQR==='undefined'){
+  waitForJsQR(0);
+}
+function waitForJsQR(attempt){
+  if(typeof jsQR!=='undefined'){ startScan(); return; }
+  if(attempt>=6){
     const msg=document.getElementById('scanMsg');
     if(msg) msg.textContent='No se pudo cargar el lector de códigos QR (revisa tu conexión a internet y recarga la página). Usa el modo manual mientras tanto.';
     return;
   }
-  startScan();
+  setTimeout(()=>waitForJsQR(attempt+1), 500);
 }
 async function startScan(){
   try{
