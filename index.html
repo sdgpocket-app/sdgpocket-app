@@ -222,7 +222,7 @@
 let state = {
   auth: 'chooser', // chooser | adminLogin | studentPick | studentRegister | studentPin | admin | student
   tab: 'inicio',
-  students: [], payments: [], attendance: [], leads: [], posts: [], comments: [], settings: {}, expenses: [],
+  students: [], payments: [], attendance: [], leads: [], posts: [], comments: [], settings: {}, expenses: [], comprobantes: [], retos: [], retosView: 'ranking',
   loaded: false,
   monthCursor: new Date(),
   scanMode: false, scanStream: null,
@@ -238,6 +238,25 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 /* Datos de comunidad (alumnos, asistencia, muro, buzón): tabla kv_shared.
    Datos de negocio (pagos, leads, gastos, contraseña admin): tabla kv_private. */
 const SHARED_KEYS = new Set(['students','attendance','posts','comments']);
+const TIME_SLOTS = [
+  {key:'lmv_0830', label:'Lunes, Miércoles y Viernes · 8:30 am'},
+  {key:'mj_1000', label:'Martes y Jueves · 10:00 am'},
+  {key:'lj_1930', label:'Lunes a Jueves · 7:30 pm'},
+  {key:'lj_2030', label:'Lunes a Jueves · 8:30 pm'},
+  {key:'v_2000', label:'Viernes · 8:00 pm'},
+  {key:'sd_1000', label:'Sábado y Domingo · 10:00 am'},
+];
+function slotLabel(key){ const s=TIME_SLOTS.find(x=>x.key===key); return s?s.label:key; }
+function monthNavHTML(){
+  const isCurrent = monthKey(state.monthCursor)===todayKey();
+  return `<div class="month-nav">
+    <button onclick="shiftMonth(-1)">‹</button>
+    <span class="month-label">${fmtMonth(state.monthCursor)}${isCurrent?' <span style="font-weight:400;font-size:12px;opacity:.7;">(mes actual)</span>':''}</span>
+    <button onclick="shiftMonth(1)">›</button>
+  </div>
+  ${!isCurrent?`<button class="btn btn-ghost btn-sm btn-block" style="margin-bottom:10px;" onclick="goToCurrentMonth()">Volver al mes actual</button>`:''}`;
+}
+function goToCurrentMonth(){ state.monthCursor=new Date(); render(); }
 const PRIVATE_KEYS = new Set(['payments','leads','settings','expenses']);
 
 async function loadAll(){
@@ -248,6 +267,7 @@ async function loadAll(){
     ]);
     state.students=s||[]; state.payments=p||[]; state.attendance=a||[]; state.leads=l||[];
     state.posts=po||[]; state.comments=co||[]; state.settings = se || {}; state.expenses = ex||[];
+    await loadRetos();
   }catch(e){ console.error(e); showToast('No se pudo conectar a la base de datos', true); }
   state.loaded = true;
   // Si ya hay una sesión de administrador activa (login previo), entra directo sin pedir credenciales otra vez.
@@ -263,7 +283,22 @@ async function reloadPrivateData(){
       safeGet('payments'), safeGet('leads'), safeGetObj('settings'), safeGet('expenses')
     ]);
     state.payments=p||[]; state.leads=l||[]; state.settings=se||{}; state.expenses=ex||[];
+    await loadComprobantes();
   }catch(e){ console.error(e); showToast('No se pudieron cargar los datos privados', true); }
+}
+async function loadComprobantes(){
+  try{
+    const { data, error } = await sb.from('comprobantes').select('*').order('created_at', {ascending:false});
+    if(error) throw error;
+    state.comprobantes = data || [];
+  }catch(e){ console.error(e); state.comprobantes = state.comprobantes || []; }
+}
+async function loadRetos(){
+  try{
+    const { data, error } = await sb.from('retos').select('*').order('created_at', {ascending:false});
+    if(error) throw error;
+    state.retos = data || [];
+  }catch(e){ console.error(e); state.retos = state.retos || []; }
 }
 function tableFor(key){ return SHARED_KEYS.has(key) ? 'kv_shared' : 'kv_private'; }
 /* Guardado seguro: SIEMPRE relee la versión más reciente de la base de datos antes de
@@ -298,6 +333,13 @@ async function saveKey(key, value){
   }catch(e){ console.error('Error guardando '+key,e); showToast('No se pudo guardar. Intenta de nuevo.', true); }
 }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
+/* Limpia cualquier caracter no numérico (ej. "$", comas, espacios) antes de convertir a número,
+   para que un monto como "$500" no se guarde como NaN y rompa las sumas de Finanzas/Inicio. */
+function sanitizeAmount(str){
+  if(str===null || str===undefined) return '';
+  const cleaned = String(str).replace(/[^0-9.]/g,'');
+  return cleaned;
+}
 async function hashPin(pin){
   const enc = new TextEncoder().encode(String(pin));
   const buf = await crypto.subtle.digest('SHA-256', enc);
@@ -425,7 +467,12 @@ function openStudentPick(){ state.auth='studentPick'; render(); }
 function renderPickList(q){
   const list = document.getElementById('pickList');
   if(!list) return;
-  const filtered = state.students.filter(s=>s.name.toLowerCase().includes((q||'').toLowerCase()));
+  const query = (q||'').trim();
+  if(query.length < 3){
+    list.innerHTML = '<div class="s-meta" style="padding:10px 0;">Escribe al menos 3 letras de tu nombre para buscar</div>';
+    return;
+  }
+  const filtered = state.students.filter(s=>s.name.toLowerCase().includes(query.toLowerCase()));
   list.innerHTML = filtered.length===0 ? '<div class="s-meta" style="padding:10px 0;">Sin resultados</div>' :
     filtered.map(s=>`
     <div class="card" style="cursor:pointer;" onclick="pickProfile('${s.id}')">
@@ -550,12 +597,13 @@ function renderAdminTabbar(){
     {id:'asistencia', label:'Asistencia', icon:'<path d="M4 12 l5 5 L20 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'},
     {id:'leads', label:'Leads', icon:'<circle cx="12" cy="8" r="4" fill="currentColor"/><path d="M4 21c0-4.5 3.5-7 8-7s8 2.5 8 7" fill="currentColor"/>'},
     {id:'muro', label:'Muro', icon:'<rect x="3" y="4" width="18" height="4" fill="currentColor"/><rect x="3" y="10" width="11" height="4" fill="currentColor"/><rect x="3" y="16" width="14" height="4" fill="currentColor"/>'},
+    {id:'retos', label:'Retos', icon:'<path d="M6 3 L18 3 L18 8 C18 12 15 14 12 14 C9 14 6 12 6 8 Z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 14 L12 19 M8 21 L16 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'},
   ];
   document.getElementById('tabbar').innerHTML = tabs.map(t=>`
     <button class="tab-btn ${state.tab===t.id?'active':''}" onclick="setAdminTab('${t.id}')">
       <span class="tab-diamond"><svg viewBox="0 0 24 24">${t.icon}</svg></span>${t.label}
     </button>`).join('');
-  const subs = {inicio:'Resumen general', alumnos:'Directorio de alumnos', pagos:'Control de pagos y morosos', asistencia:'Registro de clases', leads:'Prospectos interesados', muro:'Muro y buzón de la comunidad'};
+  const subs = {inicio:'Resumen general', alumnos:'Directorio de alumnos', pagos:'Control de pagos y morosos', asistencia:'Registro de clases', leads:'Prospectos interesados', muro:'Muro y buzón de la comunidad', retos:'Retos entre alumnos y disputas'};
   document.getElementById('topSubtitle').textContent = subs[state.tab] || '';
 }
 function setAdminTab(t){ stopScan(); state.tab=t; render(); }
@@ -563,6 +611,7 @@ function renderStudentTabbar(){
   const tabs = [
     {id:'perfil', label:'Mi perfil', icon:'<circle cx="12" cy="8" r="4" fill="currentColor"/><path d="M4 21c0-4.5 3.5-7 8-7s8 2.5 8 7" fill="currentColor"/>'},
     {id:'companeros', label:'Comunidad', icon:'<path d="M12 2 L22 12 L12 22 L2 12 Z" fill="none" stroke="currentColor" stroke-width="2.5"/>'},
+    {id:'retos', label:'Retos', icon:'<path d="M6 3 L18 3 L18 8 C18 12 15 14 12 14 C9 14 6 12 6 8 Z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 14 L12 19 M8 21 L16 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'},
     {id:'muro', label:'Muro', icon:'<rect x="3" y="4" width="18" height="4" fill="currentColor"/><rect x="3" y="10" width="11" height="4" fill="currentColor"/><rect x="3" y="16" width="14" height="4" fill="currentColor"/>'},
     {id:'buzon', label:'Buzón', icon:'<path d="M3 8 L12 14 L21 8" fill="none" stroke="currentColor" stroke-width="2.2"/><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2.2"/>'},
   ];
@@ -570,7 +619,7 @@ function renderStudentTabbar(){
     <button class="tab-btn ${state.tab===t.id?'active':''}" onclick="setStudentTab('${t.id}')">
       <span class="tab-diamond"><svg viewBox="0 0 24 24">${t.icon}</svg></span>${t.label}
     </button>`).join('');
-  const subs = {perfil:'Tu información y clases', companeros:'La Sociedad — perfiles de la academia', muro:'Torneos y promociones', buzon:'Comentarios y sugerencias'};
+  const subs = {perfil:'Tu información y clases', companeros:'La Sociedad — perfiles de la academia', retos:'Retos y ranking de la academia', muro:'Torneos y promociones', buzon:'Comentarios y sugerencias'};
   document.getElementById('topSubtitle').textContent = subs[state.tab] || '';
 }
 function setStudentTab(t){ state.tab=t; render(); }
@@ -741,6 +790,7 @@ function renderAdminTab(c, fab){
   if(state.tab==='asistencia') return renderAsistencia(c);
   if(state.tab==='leads'){ renderLeads(c); fab.style.display='flex'; fab.onclick=()=>openLeadForm(); return; }
   if(state.tab==='muro'){ renderMuroAdmin(c); fab.style.display='flex'; fab.onclick=()=>openPostForm(); return; }
+  if(state.tab==='retos') return renderRetosAdmin(c);
 }
 /* ============ DISPATCH ALUMNO ============ */
 function renderStudentTab(c, fab){
@@ -748,6 +798,7 @@ function renderStudentTab(c, fab){
   if(state.tab==='companeros') return renderCompaneros(c);
   if(state.tab==='muro') return renderMuroAlumno(c);
   if(state.tab==='buzon') return renderBuzonAlumno(c);
+  if(state.tab==='retos') return renderRetos(c);
 }
 
 /* ============ INICIO (ADMIN) ============ */
@@ -842,7 +893,7 @@ function renderAlumnos(c){
   `;
 }
 function openStudentForm(existing){
-  const s = existing || {id:uid(), name:'', phone:'', belt:'Blanco', joinDate:new Date().toISOString().slice(0,10), photo:'', role:'student', birthDate:'', weight:'', titles:'', membershipType:'regular', membershipNote:''};
+  const s = existing || {id:uid(), name:'', phone:'', instagram:'', belt:'Blanco', joinDate:new Date().toISOString().slice(0,10), photo:'', role:'student', birthDate:'', weight:'', titles:'', membershipType:'regular', membershipNote:''};
   const isNew = !existing;
   const modal=document.createElement('div'); modal.className='overlay';
   modal.innerHTML=`<div class="sheet">
@@ -854,6 +905,7 @@ function openStudentForm(existing){
     </div>
     <div class="field"><label>Nombre completo</label><input id="f_name" value="${s.name}" placeholder="Ej. Ana Torres"></div>
     <div class="field"><label>Teléfono</label><input id="f_phone" value="${s.phone}" placeholder="55 1234 5678"></div>
+    <div class="field"><label>Instagram (opcional)</label><input id="f_instagram" value="${s.instagram||''}" placeholder="@usuario"></div>
     <div class="row-2">
       <div class="field"><label>Cinturón</label><select id="f_belt">${['Blanco','Azul','Morado','Marrón','Negro'].map(b=>`<option ${s.belt===b?'selected':''}>${b}</option>`).join('')}</select></div>
       <div class="field"><label>Fecha inscripción</label><input type="date" id="f_join" value="${s.joinDate}"></div>
@@ -904,6 +956,7 @@ async function saveStudent(id, isNew){
   const data = {
     id, name,
     phone:document.getElementById('f_phone').value.trim(),
+    instagram:document.getElementById('f_instagram').value.trim().replace(/^@/,''),
     belt:document.getElementById('f_belt').value,
     joinDate:document.getElementById('f_join').value,
     photo:window._photoData||'',
@@ -988,19 +1041,26 @@ function showQR(id){
 
 /* ============ PAGOS (ADMIN) ============ */
 function renderPagos(c){
+  const pendCount = (state.comprobantes||[]).filter(x=>x.status==='pendiente').length;
   c.innerHTML=`
     <div class="section-head"><h2>Pagos</h2></div><div class="section-underline"></div>
-    <div class="tabs-scan-toggle"><button class="${!state.pagosView||state.pagosView==='cobros'?'active':''}" onclick="setPagosView('cobros')">Cobros</button><button class="${state.pagosView==='finanzas'?'active':''}" onclick="setPagosView('finanzas')">Finanzas</button></div>
+    <div class="tabs-scan-toggle">
+      <button class="${!state.pagosView||state.pagosView==='cobros'?'active':''}" onclick="setPagosView('cobros')">Cobros</button>
+      <button class="${state.pagosView==='finanzas'?'active':''}" onclick="setPagosView('finanzas')">Finanzas</button>
+      <button class="${state.pagosView==='comprobantes'?'active':''}" onclick="setPagosView('comprobantes')">Comprobantes${pendCount>0?' ('+pendCount+')':''}</button>
+    </div>
     <div id="pagosArea"></div>
   `;
-  if(state.pagosView==='finanzas') renderFinanzas(); else renderCobros();
+  if(state.pagosView==='finanzas') renderFinanzas();
+  else if(state.pagosView==='comprobantes') renderComprobantesReview();
+  else renderCobros();
 }
 function setPagosView(v){ state.pagosView=v; render(); }
 function renderCobros(){
   const area=document.getElementById('pagosArea');
   const mKey=monthKey(state.monthCursor);
   area.innerHTML=`
-    <div class="month-nav"><button onclick="shiftMonth(-1)">‹</button><span class="month-label">${fmtMonth(state.monthCursor)}</span><button onclick="shiftMonth(1)">›</button></div>
+    ${monthNavHTML()}
     ${activeStudents().length===0?emptyBlock('Sin alumnos','Agrega alumnos primero en la pestaña Alumnos'):activeStudents().map(s=>{
       if(isExempt(s)){
         return `<div class="card"><div class="student-row">
@@ -1023,9 +1083,63 @@ function renderCobros(){
   `;
 }
 function shiftMonth(n){ const d=new Date(state.monthCursor); d.setMonth(d.getMonth()+n); state.monthCursor=d; render(); }
+function renderComprobantesReview(){
+  const area=document.getElementById('pagosArea');
+  const list = (state.comprobantes||[]).slice().sort((a,b)=>{
+    if(a.status==='pendiente' && b.status!=='pendiente') return -1;
+    if(a.status!=='pendiente' && b.status==='pendiente') return 1;
+    return (b.created_at||'').localeCompare(a.created_at||'');
+  });
+  if(list.length===0){ area.innerHTML = emptyBlock('Sin comprobantes','Cuando un alumno suba un comprobante de pago, aparecerá aquí'); return; }
+  area.innerHTML = list.map(cp=>{
+    const s = state.students.find(x=>x.id===cp.student_id);
+    const name = s ? s.name : 'Alumno no encontrado';
+    const monthLabel = fmtMonth(new Date(cp.month+'-01T12:00:00'));
+    const statusPill = cp.status==='pendiente' ? '<span class="status-pill status-pendiente">Pendiente</span>'
+      : cp.status==='aprobado' ? '<span class="status-pill status-pagado">Aprobado</span>'
+      : '<span class="status-pill status-moroso">Rechazado</span>';
+    return `<div class="card">
+      <div class="student-row" style="margin-bottom:8px;">
+        <div class="avatar">${s&&s.photo?`<img src="${s.photo}">`:initials(name)}</div>
+        <div style="flex:1;"><div class="s-name">${name}</div><div class="s-meta">${monthLabel}</div></div>
+        ${statusPill}
+      </div>
+      <img src="${cp.photo}" style="width:100%;border-radius:10px;margin-bottom:10px;cursor:pointer;" onclick="window.open('${cp.photo}','_blank')">
+      ${cp.status==='pendiente' ? `
+      <div style="display:flex;gap:6px;">
+        <button class="btn btn-sm btn-primary" style="flex:1;" onclick="approveComprobante('${cp.id}','${cp.student_id}','${cp.month}')">Aprobar</button>
+        <button class="btn btn-sm btn-ghost" style="flex:1;color:var(--danger);border-color:var(--danger);" onclick="rejectComprobante('${cp.id}')">Rechazar</button>
+      </div>` : cp.note ? `<div class="s-meta">Nota: ${cp.note}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+async function approveComprobante(id, studentId, month){
+  const amount = sanitizeAmount(prompt('Monto pagado (MXN):',''));
+  if(amount===null) return;
+  await saveListSafely('payments', arr=>{
+    let p = arr.find(x=>x.studentId===studentId && x.month===month);
+    if(!p){ p={id:uid(), studentId, month}; arr.push(p); }
+    p.status='pagado'; p.amount = amount!=='' ? Number(amount) : (p.amount||0);
+    p.paidDate = new Date().toISOString().slice(0,10);
+  });
+  const { error } = await sb.from('comprobantes').update({status:'aprobado'}).eq('id', id);
+  if(error){ showToast('Pago guardado, pero no se pudo actualizar el comprobante: '+error.message, true); }
+  await loadComprobantes(); render(); showToast('Comprobante aprobado y pago registrado');
+}
+async function rejectComprobante(id){
+  const note = prompt('¿Por qué se rechaza? (opcional, se puede dejar en blanco)','');
+  if(note===null) return;
+  const { error } = await sb.from('comprobantes').update({status:'rechazado', note}).eq('id', id);
+  if(error){ showToast('No se pudo rechazar: '+error.message, true); return; }
+  await loadComprobantes(); render(); showToast('Comprobante rechazado');
+}
 async function setPayment(studentId,mKey,status){
+  const current = state.payments.find(x=>x.studentId===studentId && x.month===mKey);
+  if(current && current.status==='pagado' && status!=='pagado'){
+    if(!confirm('Este pago ya está marcado como "pagado". ¿Seguro que quieres cambiarlo?')) return;
+  }
   let amount='';
-  if(status==='pagado'){ amount=prompt('Monto pagado (MXN):',''); if(amount===null) return; }
+  if(status==='pagado'){ amount=prompt('Monto pagado (MXN):',''); if(amount===null) return; amount=sanitizeAmount(amount); }
   await saveListSafely('payments', arr=>{
     let p=arr.find(x=>x.studentId===studentId && x.month===mKey);
     if(!p){ p={id:uid(), studentId, month:mKey}; arr.push(p); }
@@ -1044,7 +1158,7 @@ function renderFinanzas(){
   const totalGastos = gastosMes.reduce((s,e)=>s+Number(e.amount||0),0);
   const balance = ingresos - totalGastos;
   area.innerHTML=`
-    <div class="month-nav"><button onclick="shiftMonth(-1)">‹</button><span class="month-label">${fmtMonth(state.monthCursor)}</span><button onclick="shiftMonth(1)">›</button></div>
+    ${monthNavHTML()}
     <div class="stat-grid">
       <div class="stat-card ok"><div class="stat-num mono" style="font-size:20px;">$${ingresos.toLocaleString('es-MX')}</div><div class="stat-label">Ingresos</div></div>
       <div class="stat-card"><div class="stat-num mono" style="font-size:20px;">$${totalGastos.toLocaleString('es-MX')}</div><div class="stat-label">Gastos</div></div>
@@ -1255,6 +1369,56 @@ async function deletePost(id){
 }
 
 /* ============ PERFIL ALUMNO ============ */
+function openComprobanteModal(){
+  const d = new Date();
+  const opts=[];
+  for(let i=-1;i<=1;i++){
+    const dd = new Date(d.getFullYear(), d.getMonth()+i, 1);
+    opts.push(`<option value="${monthKey(dd)}" ${i===0?'selected':''}>${fmtMonth(dd)}</option>`);
+  }
+  window._cpPhoto = '';
+  const modal=document.createElement('div'); modal.className='overlay';
+  modal.innerHTML=`<div class="sheet">
+    <div class="sheet-head"><h3>Subir comprobante</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="field"><label>Mes que estás pagando</label>
+      <select id="cp_month">${opts.join('')}</select>
+    </div>
+    <div class="field"><label>Foto del comprobante</label>
+      <input type="file" accept="image/*" capture="environment" onchange="handleComprobantePhoto(this)">
+      <div id="cpPhotoPreview" style="margin-top:8px;max-width:220px;"></div>
+    </div>
+    <button class="btn btn-primary btn-block" id="cpSubmitBtn" onclick="submitComprobante()">Enviar</button>
+  </div>`;
+  document.body.appendChild(modal);
+}
+function handleComprobantePhoto(input){
+  const file=input.files[0]; if(!file) return;
+  const reader=new FileReader();
+  reader.onload=(e)=>{
+    const img=new Image();
+    img.onload=()=>{
+      const maxW=640;
+      const scale=Math.min(1, maxW/img.width);
+      const w=img.width*scale, h=img.height*scale;
+      const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h;
+      canvas.getContext('2d').drawImage(img,0,0,w,h);
+      window._cpPhoto=canvas.toDataURL('image/jpeg',0.82);
+      document.getElementById('cpPhotoPreview').innerHTML=`<img src="${window._cpPhoto}" style="width:100%;border-radius:8px;">`;
+    };
+    img.src=e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+async function submitComprobante(){
+  const month = document.getElementById('cp_month').value;
+  if(!window._cpPhoto){ showToast('Sube una foto del comprobante primero', true); return; }
+  const btn = document.getElementById('cpSubmitBtn'); if(btn){ btn.disabled=true; btn.textContent='Enviando...'; }
+  const { error } = await sb.from('comprobantes').insert({
+    student_id: state.currentProfile.id, month, photo: window._cpPhoto, status: 'pendiente'
+  });
+  if(error){ showToast('No se pudo enviar: '+error.message, true); if(btn){ btn.disabled=false; btn.textContent='Enviar'; } return; }
+  closeModal(); showToast('Comprobante enviado. El admin lo va a revisar pronto.');
+}
 function renderPerfilAlumno(c){
   const s = state.students.find(x=>x.id===state.currentProfile.id) || state.currentProfile;
   const now=new Date();
@@ -1281,10 +1445,17 @@ function renderPerfilAlumno(c){
       <span class="belt-pill">${s.belt}</span>
       <div class="s-meta" style="margin-top:8px;">Alumno desde ${fmtDate(s.joinDate)}</div>
       <div class="s-meta">${age!==null?age+' años':''}${s.weight?' · '+s.weight+' kg':''}</div>
+      ${s.instagram?`<div class="s-meta" style="margin-top:2px;">📷 @${s.instagram}</div>`:''}
       <button class="btn btn-ghost btn-sm" style="margin-top:10px;" onclick="openMyEditForm()">Editar mis datos</button>
       <button class="btn btn-ghost btn-sm" style="margin-top:8px;color:var(--danger);border-color:var(--danger);" onclick="logout()">Cerrar sesión</button>
     </div>
+    <div class="card">
+      <div class="s-name" style="margin-bottom:4px;">Mi mensualidad</div>
+      <div class="s-meta" style="margin-bottom:10px;">¿Ya pagaste? Sube tu comprobante y el admin lo revisará y aprobará.</div>
+      <button class="btn btn-primary btn-block" onclick="openComprobanteModal()">Subir comprobante de pago</button>
+    </div>
     ${titleList.length?`<div class="card">${titleList.map(t=>`<div class="att-history-item"><span>🏅 ${t}</span></div>`).join('')}</div>`:''}
+    ${retosBadgesFor(s.id).length?`<div class="card">${retosBadgesFor(s.id).map(b=>`<div class="att-history-item"><span>${b}</span></div>`).join('')}</div>`:''}
 
     <div class="streak-card">
       <span class="streak-flame">${streak>0?'🔥':'🥋'}</span>
@@ -1341,6 +1512,7 @@ function openMyEditForm(){
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('myPhotoInput').click()">Cambiar foto</button></div>
     </div>
     <div class="field"><label>Teléfono</label><input id="my_phone" value="${s.phone||''}"></div>
+    <div class="field"><label>Instagram (opcional)</label><input id="my_instagram" placeholder="@tuusuario" value="${s.instagram||''}"></div>
     <div class="field"><label>Peso (kg)</label><input type="number" inputmode="decimal" id="my_weight" value="${s.weight||''}"></div>
     <div class="field"><label>Títulos (opcional, uno por línea)</label><textarea id="my_titles" rows="2">${s.titles||''}</textarea></div>
     <button class="btn btn-primary btn-block" onclick="saveMyProfile()">Guardar</button>
@@ -1369,13 +1541,14 @@ function handleMyPhoto(input){
 }
 async function saveMyProfile(){
   const phone = document.getElementById('my_phone').value.trim();
+  const instagram = document.getElementById('my_instagram').value.trim().replace(/^@/,'');
   const weight = document.getElementById('my_weight').value;
   const titles = document.getElementById('my_titles').value.trim();
   const photo = window._myPhoto;
   const myId = state.currentProfile.id;
   const fresh = await saveListSafely('students', arr=>{
     const idx = arr.findIndex(x=>x.id===myId); if(idx<0) return;
-    arr[idx].phone = phone; arr[idx].weight = weight; arr[idx].titles = titles;
+    arr[idx].phone = phone; arr[idx].instagram = instagram; arr[idx].weight = weight; arr[idx].titles = titles;
     arr[idx].photo = photo || arr[idx].photo;
   });
   state.currentProfile = fresh.find(x=>x.id===myId) || state.currentProfile;
@@ -1410,8 +1583,10 @@ function openPeerProfile(id){
       <div class="avatar" style="width:74px;height:74px;font-size:24px;margin:0 auto 8px;">${s.photo?`<img src="${s.photo}">`:initials(s.name)}</div>
       <span class="belt-pill">${s.belt}</span>
       <div class="s-meta" style="margin-top:8px;">En la academia desde ${fmtDate(s.joinDate)}</div>
+      ${s.instagram?`<div style="margin-top:6px;"><a href="https://instagram.com/${s.instagram}" target="_blank" style="color:var(--primary);text-decoration:none;font-size:13px;">📷 @${s.instagram}</a></div>`:''}
     </div>
     ${titleList.length?`<div class="card">${titleList.map(t=>`<div class="att-history-item"><span>🏅 ${t}</span></div>`).join('')}</div>`:'<div class="s-meta" style="text-align:center;margin-bottom:14px;">Sin títulos registrados</div>'}
+    ${retosBadgesFor(s.id).length?`<div class="card">${retosBadgesFor(s.id).map(b=>`<div class="att-history-item"><span>${b}</span></div>`).join('')}</div>`:''}
     <button class="btn ${gaveKudos?'btn-primary':'btn-ghost'} btn-block" onclick="toggleKudos('${s.id}')">🤝 ${gaveKudos?'¡Le diste un saludo!':'Saludar'} (${(s.kudos||[]).length})</button>
   </div>`;
   document.body.appendChild(modal);
@@ -1480,6 +1655,248 @@ function renderBuzonAlumno(c){
     <div class="card"><div class="post-type">${cm.category==='tecnico'?'Técnico · '+cm.topic:'Academia'}</div>
     <div class="s-meta" style="margin-top:4px;">${fmtDate(cm.date)}</div><div style="margin-top:4px;">${cm.message}</div></div>`).join('')}
   `;
+}
+/* ============ RETOS ============ */
+function retosStats(){
+  const wins={}, fights={};
+  (state.retos||[]).filter(r=>r.status==='completado' && r.final_winner_id).forEach(r=>{
+    wins[r.final_winner_id]=(wins[r.final_winner_id]||0)+1;
+    fights[r.challenger_id]=(fights[r.challenger_id]||0)+1;
+    if(r.opponent_id) fights[r.opponent_id]=(fights[r.opponent_id]||0)+1;
+  });
+  return {wins, fights};
+}
+function retosBadgesFor(studentId){
+  const {wins, fights} = retosStats();
+  const b=[];
+  if((fights[studentId]||0)>=1) b.push('🥋 Primer reto');
+  if((fights[studentId]||0)>=5) b.push('⚔️ Guerrero (5 peleas)');
+  if((wins[studentId]||0)>=5) b.push('🏆 Campeón (5 victorias)');
+  return b;
+}
+function renderRetos(c){
+  const myId = state.currentProfile.id;
+  c.innerHTML=`
+    <div class="section-head"><h2>Retos</h2></div><div class="section-underline"></div>
+    <div class="tabs-scan-toggle">
+      <button class="${state.retosView==='ranking'?'active':''}" onclick="setRetosView('ranking')">Ranking</button>
+      <button class="${state.retosView==='abiertos'?'active':''}" onclick="setRetosView('abiertos')">Abiertos</button>
+      <button class="${state.retosView==='mios'?'active':''}" onclick="setRetosView('mios')">Mis retos</button>
+    </div>
+    <button class="btn btn-primary btn-block" style="margin:12px 0;" onclick="openCrearRetoModal()">+ Lanzar un reto</button>
+    <div id="retosArea"></div>
+  `;
+  if(state.retosView==='abiertos') renderRetosAbiertos();
+  else if(state.retosView==='mios') renderMisRetos();
+  else renderRanking();
+}
+function setRetosView(v){ state.retosView=v; render(); }
+function renderRanking(){
+  const area=document.getElementById('retosArea');
+  const {wins} = retosStats();
+  const ranked = activeStudents().filter(s=>(wins[s.id]||0)>0).sort((a,b)=>(wins[b.id]||0)-(wins[a.id]||0));
+  if(ranked.length===0){ area.innerHTML = emptyBlock('Sin retos completados','Cuando se registren resultados de retos, el ranking aparecerá aquí'); return; }
+  const medals=['🥇','🥈','🥉'];
+  area.innerHTML = ranked.map((s,i)=>`
+    <div class="card"><div class="student-row">
+      <div style="width:26px;text-align:center;font-size:16px;">${medals[i]||(i+1)}</div>
+      <div class="avatar">${s.photo?`<img src="${s.photo}">`:initials(s.name)}</div>
+      <div style="flex:1;"><div class="s-name">${s.name}${s.id===state.currentProfile.id?' (tú)':''}</div><span class="belt-pill">${s.belt}</span></div>
+      <div class="s-meta mono">${wins[s.id]} ${wins[s.id]===1?'victoria':'victorias'}</div>
+    </div></div>`).join('');
+}
+function renderRetosAbiertos(){
+  const area=document.getElementById('retosArea');
+  const myId = state.currentProfile.id;
+  const abiertos = (state.retos||[]).filter(r=>r.status==='abierto' && r.challenger_id!==myId);
+  if(abiertos.length===0){ area.innerHTML = emptyBlock('Sin retos abiertos','Cuando alguien lance un reto abierto, aparecerá aquí para que lo aceptes'); return; }
+  area.innerHTML = abiertos.map(r=>{
+    const s = state.students.find(x=>x.id===r.challenger_id);
+    return `<div class="card">
+      <div class="s-name">${s?s.name:'Alumno'} lanzó un reto abierto</div>
+      <div class="s-meta" style="margin-top:2px;">${slotLabel(r.time_slot)}</div>
+      <button class="btn btn-primary btn-sm btn-block" style="margin-top:10px;" onclick="tomarRetoAbierto('${r.id}')">Aceptar este reto</button>
+    </div>`;
+  }).join('');
+}
+function renderMisRetos(){
+  const area=document.getElementById('retosArea');
+  const myId = state.currentProfile.id;
+  const mine = (state.retos||[]).filter(r=>r.challenger_id===myId || r.opponent_id===myId)
+    .slice().sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||''));
+  if(mine.length===0){ area.innerHTML = emptyBlock('Aún no tienes retos','Lanza un reto con el botón de arriba'); return; }
+  area.innerHTML = mine.map(r=>{
+    const otherId = r.challenger_id===myId ? r.opponent_id : r.challenger_id;
+    const other = otherId ? state.students.find(x=>x.id===otherId) : null;
+    const iAmChallenger = r.challenger_id===myId;
+    let body='';
+    if(r.status==='pendiente' && !iAmChallenger){
+      body = `<div class="s-meta" style="margin-bottom:8px;">${slotLabel(r.time_slot)}</div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-sm btn-primary" style="flex:1;" onclick="aceptarRetoEspecifico('${r.id}')">Aceptar</button>
+          <button class="btn btn-sm btn-ghost" style="flex:1;" onclick="rechazarReto('${r.id}')">Rechazar</button>
+        </div>`;
+    } else if(r.status==='pendiente' && iAmChallenger){
+      body = `<div class="s-meta" style="margin-bottom:8px;">${slotLabel(r.time_slot)} · Esperando respuesta</div>
+        <button class="btn btn-ghost btn-sm btn-block" onclick="cancelarReto('${r.id}')">Cancelar reto</button>`;
+    } else if(r.status==='abierto'){
+      body = `<div class="s-meta" style="margin-bottom:8px;">${slotLabel(r.time_slot)} · Reto abierto, esperando que alguien lo tome</div>
+        <button class="btn btn-ghost btn-sm btn-block" onclick="cancelarReto('${r.id}')">Cancelar reto</button>`;
+    } else if(r.status==='aceptado'){
+      body = `<div class="s-meta" style="margin-bottom:8px;">${slotLabel(r.time_slot)} · Programado</div>
+        <button class="btn btn-primary btn-sm btn-block" onclick="openReportarResultado('${r.id}')">Reportar resultado</button>`;
+    } else if(r.status==='por_confirmar'){
+      if(r.reported_by===myId){
+        body = `<div class="s-meta">Reportaste que ganó ${r.reported_winner_id===myId?'tú':(other?other.name:'tu rival')}. Esperando que ${other?other.name:'tu rival'} confirme.</div>`;
+      } else {
+        const whoWon = r.reported_winner_id===myId ? 'tú' : (other?other.name:'tu rival');
+        body = `<div class="s-meta" style="margin-bottom:8px;">${other?other.name:'Tu rival'} reportó que ganó ${whoWon}. ¿Confirmas?</div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-sm btn-primary" style="flex:1;" onclick="reportarResultado('${r.id}','${r.reported_winner_id}')">Confirmar</button>
+            <button class="btn btn-sm btn-ghost" style="flex:1;" onclick="reportarResultado('${r.id}','${r.reported_winner_id===myId?otherId:myId}')">No es correcto</button>
+          </div>`;
+      }
+    } else if(r.status==='en_disputa'){
+      body = `<div class="s-meta">Los resultados no coincidieron — un administrador va a revisarlo y resolverlo.</div>`;
+    } else if(r.status==='completado'){
+      const won = r.final_winner_id===myId;
+      body = `<div class="s-meta">${won?'🏆 Ganaste este reto':'Resultado: ganó '+(other && r.final_winner_id===otherId ? other.name : 'tu rival')}</div>`;
+    } else if(r.status==='rechazado'){
+      body = `<div class="s-meta">Reto rechazado</div>`;
+    } else if(r.status==='cancelado'){
+      body = `<div class="s-meta">Reto cancelado</div>`;
+    }
+    return `<div class="card">
+      <div class="s-name">${other ? 'vs. '+other.name : (r.status==='abierto'?'Reto abierto':'Esperando rival')}</div>
+      ${body}
+    </div>`;
+  }).join('');
+}
+function openCrearRetoModal(){
+  const myId = state.currentProfile.id;
+  const others = activeStudents().filter(s=>s.id!==myId);
+  const modal=document.createElement('div'); modal.className='overlay';
+  modal.innerHTML=`<div class="sheet">
+    <div class="sheet-head"><h3>Lanzar un reto</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="field"><label>Tipo de reto</label>
+      <select id="rt_type" onchange="toggleRetoOpponentField()">
+        <option value="especifico">Reto a alguien específico</option>
+        <option value="abierto">Reto abierto (cualquiera lo puede aceptar)</option>
+      </select>
+    </div>
+    <div class="field" id="rt_opponent_wrap"><label>¿A quién retas?</label>
+      <select id="rt_opponent">${others.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}</select>
+    </div>
+    <div class="field"><label>Horario propuesto</label>
+      <select id="rt_slot">${TIME_SLOTS.map(t=>`<option value="${t.key}">${t.label}</option>`).join('')}</select>
+    </div>
+    <button class="btn btn-primary btn-block" onclick="crearReto()">Lanzar reto</button>
+  </div>`;
+  document.body.appendChild(modal);
+}
+function toggleRetoOpponentField(){
+  const type = document.getElementById('rt_type').value;
+  document.getElementById('rt_opponent_wrap').style.display = type==='especifico' ? '' : 'none';
+}
+async function crearReto(){
+  const type = document.getElementById('rt_type').value;
+  const timeSlot = document.getElementById('rt_slot').value;
+  const opponentId = type==='especifico' ? document.getElementById('rt_opponent').value : null;
+  const row = {
+    challenger_id: state.currentProfile.id, opponent_id: opponentId, type, time_slot: timeSlot,
+    status: type==='especifico' ? 'pendiente' : 'abierto'
+  };
+  const { error } = await sb.from('retos').insert(row);
+  if(error){ showToast('No se pudo crear el reto: '+error.message, true); return; }
+  closeModal(); await loadRetos(); render(); showToast('Reto enviado');
+}
+async function tomarRetoAbierto(id){
+  const { error } = await sb.from('retos').update({opponent_id: state.currentProfile.id, status:'aceptado'}).eq('id', id);
+  if(error){ showToast('No se pudo aceptar: '+error.message, true); return; }
+  await loadRetos(); render(); showToast('Reto aceptado, ¡suerte!');
+}
+async function aceptarRetoEspecifico(id){
+  const { error } = await sb.from('retos').update({status:'aceptado'}).eq('id', id);
+  if(error){ showToast('No se pudo aceptar: '+error.message, true); return; }
+  await loadRetos(); render(); showToast('Reto aceptado, ¡suerte!');
+}
+async function rechazarReto(id){
+  const { error } = await sb.from('retos').update({status:'rechazado'}).eq('id', id);
+  if(error){ showToast('No se pudo rechazar: '+error.message, true); return; }
+  await loadRetos(); render();
+}
+async function cancelarReto(id){
+  const { error } = await sb.from('retos').update({status:'cancelado'}).eq('id', id);
+  if(error){ showToast('No se pudo cancelar: '+error.message, true); return; }
+  await loadRetos(); render();
+}
+function openReportarResultado(id){
+  const r = state.retos.find(x=>x.id===id); if(!r) return;
+  const myId = state.currentProfile.id;
+  const otherId = r.challenger_id===myId ? r.opponent_id : r.challenger_id;
+  const other = state.students.find(x=>x.id===otherId);
+  const modal=document.createElement('div'); modal.className='overlay';
+  modal.innerHTML=`<div class="sheet">
+    <div class="sheet-head"><h3>¿Quién ganó?</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <button class="btn btn-primary btn-block" style="margin-bottom:8px;" onclick="reportarResultado('${id}','${myId}')">Yo gané</button>
+    <button class="btn btn-ghost btn-block" onclick="reportarResultado('${id}','${otherId}')">Ganó ${other?other.name:'mi rival'}</button>
+  </div>`;
+  document.body.appendChild(modal);
+}
+async function reportarResultado(id, winnerId){
+  const r = state.retos.find(x=>x.id===id); if(!r) return;
+  const myId = state.currentProfile.id;
+  closeModal();
+  if(!r.reported_winner_id){
+    const { error } = await sb.from('retos').update({status:'por_confirmar', reported_winner_id: winnerId, reported_by: myId}).eq('id', id);
+    if(error){ showToast('No se pudo reportar: '+error.message, true); return; }
+    await loadRetos(); render(); showToast('Resultado reportado, esperando confirmación del rival');
+    return;
+  }
+  if(r.reported_by===myId){ showToast('Ya reportaste este resultado, espera a que confirme tu rival'); return; }
+  if(r.reported_winner_id===winnerId){
+    const { error } = await sb.from('retos').update({status:'completado', final_winner_id: winnerId}).eq('id', id);
+    if(error){ showToast('No se pudo confirmar: '+error.message, true); return; }
+    await loadRetos(); render(); showToast('Resultado confirmado');
+  } else {
+    const { error } = await sb.from('retos').update({status:'en_disputa'}).eq('id', id);
+    if(error){ showToast('No se pudo actualizar: '+error.message, true); return; }
+    await loadRetos(); render(); showToast('Los resultados no coinciden, un admin lo va a resolver', true);
+  }
+}
+/* Panel de administrador para resolver disputas de retos */
+function renderRetosAdmin(c){
+  const disputados = (state.retos||[]).filter(r=>r.status==='en_disputa');
+  const historial = (state.retos||[]).filter(r=>r.status!=='en_disputa').slice(0,30);
+  c.innerHTML = `
+    <div class="section-head"><h2>Retos</h2></div><div class="section-underline"></div>
+    ${disputados.length>0 ? `<div class="s-name" style="margin-bottom:8px;">⚠️ Disputas por resolver (${disputados.length})</div>` +
+      disputados.map(r=>{
+        const chall = state.students.find(x=>x.id===r.challenger_id);
+        const opp = state.students.find(x=>x.id===r.opponent_id);
+        return `<div class="card">
+          <div class="s-name">${chall?chall.name:'?'} vs. ${opp?opp.name:'?'}</div>
+          <div class="s-meta" style="margin:4px 0 10px;">${slotLabel(r.time_slot)}</div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-sm btn-primary" style="flex:1;" onclick="resolverDisputaAdmin('${r.id}','${r.challenger_id}')">Ganó ${chall?chall.name:'reto A'}</button>
+            <button class="btn btn-sm btn-primary" style="flex:1;" onclick="resolverDisputaAdmin('${r.id}','${r.opponent_id}')">Ganó ${opp?opp.name:'reto B'}</button>
+          </div>
+        </div>`;
+      }).join('') : '<div class="s-meta" style="margin-bottom:14px;">Sin disputas pendientes</div>'}
+    <div class="s-name" style="margin:16px 0 8px;">Historial reciente</div>
+    ${historial.length===0?emptyBlock('Sin retos aún','Cuando los alumnos empiecen a retarse, aparecerán aquí'):historial.map(r=>{
+      const chall = state.students.find(x=>x.id===r.challenger_id);
+      const opp = state.students.find(x=>x.id===r.opponent_id);
+      const statusTxt = {pendiente:'Pendiente de aceptar', abierto:'Reto abierto', aceptado:'Programado', por_confirmar:'Esperando confirmación', completado:'Completado', rechazado:'Rechazado', cancelado:'Cancelado'}[r.status]||r.status;
+      return `<div class="card"><div class="s-name">${chall?chall.name:'?'} vs. ${opp?opp.name:'—'}</div>
+        <div class="s-meta">${slotLabel(r.time_slot)} · ${statusTxt}${r.final_winner_id?' · Ganó '+(r.final_winner_id===r.challenger_id?(chall?chall.name:''):(opp?opp.name:'')):''}</div></div>`;
+    }).join('')}
+  `;
+}
+async function resolverDisputaAdmin(id, winnerId){
+  const { error } = await sb.from('retos').update({status:'completado', final_winner_id: winnerId, admin_note:'Resuelto por admin'}).eq('id', id);
+  if(error){ showToast('No se pudo resolver: '+error.message, true); return; }
+  await loadRetos(); render(); showToast('Disputa resuelta');
 }
 function toggleTechTopic(){
   const cat = document.getElementById('c_cat').value;
