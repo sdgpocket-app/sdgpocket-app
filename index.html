@@ -642,7 +642,15 @@ function renderStudentTabbar(){
   const subs = {perfil:'Tu información y clases', companeros:'La Sociedad — perfiles de la academia', retos:'Retos y ranking de la academia', muro:'Torneos y promociones', buzon:'Comentarios y sugerencias'};
   document.getElementById('topSubtitle').textContent = subs[state.tab] || '';
 }
-function setStudentTab(t){ state.tab=t; render(); }
+async function setStudentTab(t){
+  state.tab=t; render();
+  if(t==='perfil' || t==='companeros' || t==='retos'){
+    const [a,s] = await Promise.all([safeGet('attendance'), safeGet('students')]);
+    if(a) state.attendance = a;
+    if(s) state.students = s;
+    if(state.tab===t) render();
+  }
+}
 
 /* ============ HELPERS ============ */
 function monthKey(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
