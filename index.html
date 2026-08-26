@@ -325,10 +325,16 @@ function tableFor(key){ return SHARED_KEYS.has(key) ? 'kv_shared' : 'kv_private'
    modificar y guardar, en vez de confiar en lo que ya está en pantalla (state.xxx).
    Esto evita que una pantalla desactualizada sobrescriba y borre datos guardados por
    otro dispositivo o en otro momento. */
+/* Guardado seguro: SIEMPRE relee la versión más reciente de la base de datos antes de
+   modificar y guardar, en vez de confiar en lo que ya está en pantalla (state.xxx).
+   Esto evita que una pantalla desactualizada sobrescriba y borre datos guardados por
+   otro dispositivo o en otro momento. Devuelve null si el guardado falló, para que
+   quien llama a esta función NUNCA muestre "éxito" si en realidad no se guardó nada. */
 async function saveListSafely(key, mutateFn){
   const fresh = (await safeGet(key)) || [];
   mutateFn(fresh);
-  await saveKey(key, fresh);
+  const ok = await saveKey(key, fresh);
+  if(!ok) return null;
   state[key] = fresh;
   return fresh;
 }
@@ -350,7 +356,8 @@ async function saveKey(key, value){
   try{
     const { error } = await sb.from(tableFor(key)).upsert({ key, value, updated_at: new Date().toISOString() });
     if(error) throw error;
-  }catch(e){ console.error('Error guardando '+key,e); showToast('No se pudo guardar. Intenta de nuevo.', true); }
+    return true;
+  }catch(e){ console.error('Error guardando '+key,e); showToast('No se pudo guardar: '+(e.message||'error desconocido'), true); return false; }
 }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 /* Limpia cualquier caracter no numérico (ej. "$", comas, espacios) antes de convertir a número,
@@ -590,7 +597,8 @@ async function checkStudentPin(){
   if(p._isNew){
     p.pinHash = await hashPin(state.pinBuffer);
     delete p._isNew;
-    await saveListSafely('students', arr=>arr.push(p));
+    const result = await saveListSafely('students', arr=>arr.push(p));
+    if(!result) return;
     state.currentProfile = p;
     state.auth='student'; state.tab='perfil'; state.pinBuffer='';
     render();
@@ -996,29 +1004,34 @@ async function saveStudent(id, isNew){
     pinHash,
     role:'student'
   };
-  if(isNew){ await saveListSafely('students', arr=>arr.push(data)); }
-  else { await saveListSafely('students', arr=>{ const idx=arr.findIndex(s=>s.id===id); if(idx>=0) arr[idx]=data; }); }
+  let result;
+  if(isNew){ result = await saveListSafely('students', arr=>arr.push(data)); }
+  else { result = await saveListSafely('students', arr=>{ const idx=arr.findIndex(s=>s.id===id); if(idx>=0) arr[idx]=data; }); }
+  if(!result) return;
   closeModal(); render(); showToast('Alumno guardado');
 }
 async function archiveStudent(id){
-  await saveListSafely('students', arr=>{
+  const result = await saveListSafely('students', arr=>{
     const idx=arr.findIndex(s=>s.id===id); if(idx>=0) arr[idx].archived = true;
   });
+  if(!result) return;
   closeModal(); render(); showToast('Alumno enviado a la papelera');
 }
 async function restoreStudent(id){
-  await saveListSafely('students', arr=>{
+  const result = await saveListSafely('students', arr=>{
     const idx=arr.findIndex(s=>s.id===id); if(idx>=0) arr[idx].archived = false;
   });
+  if(!result) return;
   closeModal(); render(); showToast('Alumno restaurado');
 }
 async function deleteStudent(id){
   if(!confirm('Esto borra al alumno y todo su historial de forma permanente, sin poder recuperarlo. ¿Continuar?')) return;
-  await Promise.all([
+  const results = await Promise.all([
     saveListSafely('students', arr=>{ const idx=arr.findIndex(s=>s.id===id); if(idx>=0) arr.splice(idx,1); }),
     saveListSafely('payments', arr=>{ for(let i=arr.length-1;i>=0;i--){ if(arr[i].studentId===id) arr.splice(i,1); } }),
     saveListSafely('attendance', arr=>{ for(let i=arr.length-1;i>=0;i--){ if(arr[i].studentId===id) arr.splice(i,1); } })
   ]);
+  if(results.some(r=>!r)) return;
   closeModal(); render(); showToast('Alumno eliminado definitivamente');
 }
 function openStudentDetail(id){
@@ -1144,12 +1157,13 @@ function renderComprobantesReview(){
 async function approveComprobante(id, studentId, month){
   const amount = sanitizeAmount(prompt('Monto pagado (MXN):',''));
   if(amount===null) return;
-  await saveListSafely('payments', arr=>{
+  const result = await saveListSafely('payments', arr=>{
     let p = arr.find(x=>x.studentId===studentId && x.month===month);
     if(!p){ p={id:uid(), studentId, month}; arr.push(p); }
     p.status='pagado'; p.amount = amount!=='' ? Number(amount) : (p.amount||0);
     p.paidDate = new Date().toISOString().slice(0,10);
   });
+  if(!result) return;
   const { error } = await sb.from('comprobantes').update({status:'aprobado'}).eq('id', id);
   if(error){ showToast('Pago guardado, pero no se pudo actualizar el comprobante: '+error.message, true); }
   await loadComprobantes(); render(); showToast('Comprobante aprobado y pago registrado');
@@ -1168,12 +1182,13 @@ async function setPayment(studentId,mKey,status){
   }
   let amount='';
   if(status==='pagado'){ amount=prompt('Monto pagado (MXN):',''); if(amount===null) return; amount=sanitizeAmount(amount); }
-  await saveListSafely('payments', arr=>{
+  const result = await saveListSafely('payments', arr=>{
     let p=arr.find(x=>x.studentId===studentId && x.month===mKey);
     if(!p){ p={id:uid(), studentId, month:mKey}; arr.push(p); }
     p.status=status; p.amount = amount!=='' ? Number(amount) : (p.amount||0);
     p.paidDate = status==='pagado' ? new Date().toISOString().slice(0,10) : p.paidDate;
   });
+  if(!result) return;
   render(); showToast('Pago actualizado');
 }
 
@@ -1218,7 +1233,8 @@ async function saveExpense(){
   const amount=document.getElementById('e_amount').value;
   if(!concept || !amount){ showToast('Completa concepto y monto', true); return; }
   const category=document.getElementById('e_category').value, month=monthKey(state.monthCursor);
-  await saveListSafely('expenses', arr=>arr.push({id:uid(), concept, amount:Number(amount), category, month}));
+  const result = await saveListSafely('expenses', arr=>arr.push({id:uid(), concept, amount:Number(amount), category, month}));
+  if(!result) return;
   closeModal(); render(); showToast('Gasto guardado');
 }
 async function deleteExpense(id){
@@ -1273,7 +1289,8 @@ async function markAttendance(studentId){
   const forStudent = state.attendance.filter(a=>a.studentId===studentId && a.date===todayStr);
   if(forStudent.some(a=>a.className===state.attendanceClass)){ showToast('Ya está registrado en esta clase hoy'); return; }
   if(forStudent.length>=MAX_SESSIONS_PER_DAY){ showToast('Ya alcanzó el máximo de '+MAX_SESSIONS_PER_DAY+' clases hoy'); return; }
-  await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:state.attendanceClass}));
+  const result = await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:state.attendanceClass}));
+  if(!result) return;
   const s=state.students.find(x=>x.id===studentId);
   showToast((s?s.name:'Alumno')+' registrado en '+state.attendanceClass+' ✓'); render();
 }
@@ -1330,8 +1347,8 @@ async function handleScanHit(studentId){
   } else if(forStudent.length>=MAX_SESSIONS_PER_DAY){
     showToast(s.name+' ya alcanzó el máximo de '+MAX_SESSIONS_PER_DAY+' clases hoy');
   } else{
-    await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:state.attendanceClass}));
-    showToast(s.name+' registrado en '+state.attendanceClass+' ✓');
+    const result = await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:state.attendanceClass}));
+    if(result) showToast(s.name+' registrado en '+state.attendanceClass+' ✓');
   }
   setTimeout(()=>{ if(state.scanMode) requestAnimationFrame(scanLoop); }, 1200);
 }
@@ -1363,7 +1380,8 @@ async function saveLead(){
   const name=document.getElementById('l_name').value.trim();
   if(!name){ showToast('Escribe un nombre', true); return; }
   const phone=document.getElementById('l_phone').value.trim(), notes=document.getElementById('l_notes').value.trim();
-  await saveListSafely('leads', arr=>arr.push({id:uid(), name, phone, notes, date:new Date().toISOString().slice(0,10), status:'nuevo'}));
+  const result = await saveListSafely('leads', arr=>arr.push({id:uid(), name, phone, notes, date:new Date().toISOString().slice(0,10), status:'nuevo'}));
+  if(!result) return;
   closeModal(); render(); showToast('Lead guardado');
 }
 async function setLeadStatus(id,status){
@@ -1429,7 +1447,8 @@ async function savePost(){
   const title=document.getElementById('p_title').value.trim();
   if(!title){ showToast('Escribe un título', true); return; }
   const type=document.getElementById('p_type').value, body=document.getElementById('p_body').value.trim(), photo=window._postPhoto||'';
-  await saveListSafely('posts', arr=>arr.push({id:uid(), type, title, body, photo, date:new Date().toISOString().slice(0,10), reactions:{likes:[],asistire:[]}}));
+  const result = await saveListSafely('posts', arr=>arr.push({id:uid(), type, title, body, photo, date:new Date().toISOString().slice(0,10), reactions:{likes:[],asistire:[]}}));
+  if(!result) return;
   closeModal(); render(); showToast('Publicado en el muro');
 }
 async function deletePost(id){
@@ -1620,6 +1639,7 @@ async function saveMyProfile(){
     arr[idx].phone = phone; arr[idx].instagram = instagram; arr[idx].weight = weight; arr[idx].titles = titles;
     arr[idx].photo = photo || arr[idx].photo;
   });
+  if(!fresh) return;
   state.currentProfile = fresh.find(x=>x.id===myId) || state.currentProfile;
   closeModal(); render(); showToast('Datos actualizados');
 }
