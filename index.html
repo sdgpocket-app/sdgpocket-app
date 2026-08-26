@@ -225,7 +225,7 @@ let state = {
   students: [], payments: [], attendance: [], leads: [], posts: [], comments: [], settings: {}, expenses: [], comprobantes: [], retos: [], retosView: 'ranking',
   loaded: false,
   monthCursor: new Date(),
-  scanMode: false, scanStream: null,
+  scanMode: false, scanStream: null, attendanceClass: null,
   pinBuffer: '',
   pendingProfile: null,
   currentProfile: null,
@@ -238,15 +238,19 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 /* Datos de comunidad (alumnos, asistencia, muro, buzón): tabla kv_shared.
    Datos de negocio (pagos, leads, gastos, contraseña admin): tabla kv_private. */
 const SHARED_KEYS = new Set(['students','attendance','posts','comments']);
-const TIME_SLOTS = [
-  {key:'lmv_0830', label:'Lunes, Miércoles y Viernes · 8:30 am'},
-  {key:'mj_1000', label:'Martes y Jueves · 10:00 am'},
-  {key:'lj_1930', label:'Lunes a Jueves · 7:30 pm'},
-  {key:'lj_2030', label:'Lunes a Jueves · 8:30 pm'},
-  {key:'v_2000', label:'Viernes · 8:00 pm'},
-  {key:'sd_1000', label:'Sábado y Domingo · 10:00 am'},
-];
-function slotLabel(key){ const s=TIME_SLOTS.find(x=>x.key===key); return s?s.label:key; }
+const SCHEDULE_BY_DAY = {
+  'Lunes': ['8:30 am', '7:30 pm', '8:30 pm'],
+  'Martes': ['10:00 am', '7:30 pm', '8:30 pm'],
+  'Miércoles': ['8:30 am', '7:30 pm', '8:30 pm'],
+  'Jueves': ['10:00 am', '7:30 pm', '8:30 pm'],
+  'Viernes': ['8:30 am', '8:00 pm'],
+  'Sábado': ['10:00 am'],
+  'Domingo': ['10:00 am'],
+};
+function slotKey(day, time){ return day+'|'+time; }
+function slotLabel(key){ if(!key) return ''; const [day,time]=key.split('|'); return day+' · '+time; }
+const DAY_NAMES = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+function todayDayName(){ return DAY_NAMES[new Date().getDay()]; }
 function monthNavHTML(){
   const isCurrent = monthKey(state.monthCursor)===todayKey();
   return `<div class="month-nav">
@@ -1200,42 +1204,64 @@ async function deleteExpense(id){
 
 /* ============ ASISTENCIA (ADMIN) ============ */
 function renderAsistencia(c){
+  const todayClasses = SCHEDULE_BY_DAY[todayDayName()] || [];
+  if(!state.attendanceClass || !todayClasses.includes(state.attendanceClass)){
+    state.attendanceClass = todayClasses[0] || null;
+  }
   c.innerHTML=`
     <div class="section-head"><h2>Asistencia</h2></div><div class="section-underline"></div>
+    ${todayClasses.length===0 ? `<div class="s-meta" style="margin-bottom:12px;">Hoy (${todayDayName()}) no hay clases programadas en el horario.</div>` : `
+    <div class="field"><label>Clase de hoy (${todayDayName()})</label>
+      <select id="att_class" onchange="setAttendanceClass(this.value)">
+        ${todayClasses.map(t=>`<option value="${t}" ${state.attendanceClass===t?'selected':''}>${t}</option>`).join('')}
+      </select>
+    </div>`}
     <div class="tabs-scan-toggle"><button class="${!state.scanMode?'active':''}" onclick="switchScan(false)">Manual</button><button class="${state.scanMode?'active':''}" onclick="switchScan(true)">Escanear QR</button></div>
     <div id="attArea"></div>`;
   if(state.scanMode) renderScanArea(); else renderManualAttendance();
 }
+function setAttendanceClass(val){ state.attendanceClass = val; render(); }
 function switchScan(mode){ stopScan(); state.scanMode=mode; render(); }
 const MAX_SESSIONS_PER_DAY = 3;
 function renderManualAttendance(){
   const area=document.getElementById('attArea');
   const todayStr=new Date().toISOString().slice(0,10);
-  const countsToday={};
-  state.attendance.filter(a=>a.date===todayStr).forEach(a=>{ countsToday[a.studentId]=(countsToday[a.studentId]||0)+1; });
+  const todayRecords = state.attendance.filter(a=>a.date===todayStr);
+  const todayClasses = SCHEDULE_BY_DAY[todayDayName()] || [];
+  if(!state.attendanceClass){ area.innerHTML = emptyBlock('Sin clase seleccionada','Elige la clase de hoy arriba para poder registrar asistencia'); return; }
   area.innerHTML = activeStudents().length===0?emptyBlock('Sin alumnos','Agrega alumnos primero'):activeStudents().map(s=>{
-    const n = countsToday[s.id]||0;
+    const forStudent = todayRecords.filter(a=>a.studentId===s.id);
+    const alreadyThisClass = forStudent.some(a=>a.className===state.attendanceClass);
+    const n = forStudent.length;
     const full = n>=MAX_SESSIONS_PER_DAY;
+    const attendedLabels = forStudent.map(a=>a.className).filter(Boolean);
     return `
     <div class="card"><div class="student-row">
       <div class="avatar">${s.photo?`<img src="${s.photo}">`:initials(s.name)}</div>
-      <div style="flex:1;"><div class="s-name">${s.name}</div><div class="s-meta">${n===0?'Sin registrar hoy':n+' de '+MAX_SESSIONS_PER_DAY+' clases hoy'}</div></div>
-      <button class="btn btn-sm ${n>0?'btn-primary':'btn-ghost'}" ${full?'disabled':''} onclick="markAttendance('${s.id}')">${full?'✓ Máximo':(n>0?'+1 clase':'Marcar')}</button>
+      <div style="flex:1;"><div class="s-name">${s.name}</div><div class="s-meta">${attendedLabels.length===0?'Sin registrar hoy':'Hoy: '+attendedLabels.join(', ')}</div></div>
+      <button class="btn btn-sm ${alreadyThisClass?'btn-primary':'btn-ghost'}" ${(alreadyThisClass||full)?'disabled':''} onclick="markAttendance('${s.id}')">${alreadyThisClass?'✓ Ya en esta clase':(full?'Máximo del día':'Marcar')}</button>
     </div></div>`;
   }).join('');
 }
 async function markAttendance(studentId){
+  if(!state.attendanceClass){ showToast('Selecciona la clase de hoy primero', true); return; }
   const todayStr=new Date().toISOString().slice(0,10);
-  const countToday=state.attendance.filter(a=>a.studentId===studentId && a.date===todayStr).length;
-  if(countToday>=MAX_SESSIONS_PER_DAY){ showToast('Ya alcanzó el máximo de '+MAX_SESSIONS_PER_DAY+' clases hoy'); return; }
-  await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:'Clase general'}));
+  const forStudent = state.attendance.filter(a=>a.studentId===studentId && a.date===todayStr);
+  if(forStudent.some(a=>a.className===state.attendanceClass)){ showToast('Ya está registrado en esta clase hoy'); return; }
+  if(forStudent.length>=MAX_SESSIONS_PER_DAY){ showToast('Ya alcanzó el máximo de '+MAX_SESSIONS_PER_DAY+' clases hoy'); return; }
+  await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:state.attendanceClass}));
   const s=state.students.find(x=>x.id===studentId);
-  showToast((s?s.name:'Alumno')+' registrado ✓ ('+(countToday+1)+'/'+MAX_SESSIONS_PER_DAY+')'); render();
+  showToast((s?s.name:'Alumno')+' registrado en '+state.attendanceClass+' ✓'); render();
 }
 function renderScanArea(){
   const area=document.getElementById('attArea');
   area.innerHTML=`<div class="scan-wrap"><video id="scanVideo" playsinline muted autoplay></video><div class="scan-frame"></div></div>
     <div class="scan-msg" id="scanMsg">Apunta la cámara al código QR del alumno</div><canvas id="scanCanvas" style="display:none;"></canvas>`;
+  if(typeof jsQR==='undefined'){
+    const msg=document.getElementById('scanMsg');
+    if(msg) msg.textContent='No se pudo cargar el lector de códigos QR (revisa tu conexión a internet y recarga la página). Usa el modo manual mientras tanto.';
+    return;
+  }
   startScan();
 }
 async function startScan(){
@@ -1250,20 +1276,35 @@ function scanLoop(){
   if(!state.scanMode) return;
   const video=document.getElementById('scanVideo'); const canvas=document.getElementById('scanCanvas');
   if(!video||!canvas||video.readyState!==video.HAVE_ENOUGH_DATA){ requestAnimationFrame(scanLoop); return; }
-  canvas.width=video.videoWidth; canvas.height=video.videoHeight;
-  const ctx=canvas.getContext('2d'); ctx.drawImage(video,0,0,canvas.width,canvas.height);
-  const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
-  const code=jsQR(imageData.data, imageData.width, imageData.height);
-  if(code && code.data && code.data.startsWith('LSDG-')){ handleScanHit(code.data.replace('LSDG-','')); }
-  else{ requestAnimationFrame(scanLoop); }
+  try{
+    canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+    const ctx=canvas.getContext('2d'); ctx.drawImage(video,0,0,canvas.width,canvas.height);
+    const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
+    const code=jsQR(imageData.data, imageData.width, imageData.height);
+    if(code && code.data && code.data.startsWith('LSDG-')){ handleScanHit(code.data.replace('LSDG-','')); return; }
+    if(code && code.data){ showToast('Código QR no reconocido por la app', true); }
+  }catch(e){
+    console.error('Error leyendo QR', e);
+    const msg=document.getElementById('scanMsg');
+    if(msg) msg.textContent='Hubo un error leyendo el código. Usa el modo manual mientras tanto.';
+    return;
+  }
+  requestAnimationFrame(scanLoop);
 }
 async function handleScanHit(studentId){
   const s=state.students.find(x=>x.id===studentId);
   const todayStr=new Date().toISOString().slice(0,10);
   if(!s){ showToast('Código no reconocido', true); setTimeout(()=>requestAnimationFrame(scanLoop),900); return; }
-  const countToday=state.attendance.filter(a=>a.studentId===studentId && a.date===todayStr).length;
-  if(countToday>=MAX_SESSIONS_PER_DAY){ showToast(s.name+' ya alcanzó el máximo de '+MAX_SESSIONS_PER_DAY+' clases hoy'); }
-  else{ await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:'Clase general'})); showToast(s.name+' registrado ✓ ('+(countToday+1)+'/'+MAX_SESSIONS_PER_DAY+')'); }
+  if(!state.attendanceClass){ showToast('Selecciona la clase de hoy primero', true); setTimeout(()=>{ if(state.scanMode) requestAnimationFrame(scanLoop); }, 1200); return; }
+  const forStudent = state.attendance.filter(a=>a.studentId===studentId && a.date===todayStr);
+  if(forStudent.some(a=>a.className===state.attendanceClass)){
+    showToast(s.name+' ya está registrado en esta clase');
+  } else if(forStudent.length>=MAX_SESSIONS_PER_DAY){
+    showToast(s.name+' ya alcanzó el máximo de '+MAX_SESSIONS_PER_DAY+' clases hoy');
+  } else{
+    await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date:todayStr, className:state.attendanceClass}));
+    showToast(s.name+' registrado en '+state.attendanceClass+' ✓');
+  }
   setTimeout(()=>{ if(state.scanMode) requestAnimationFrame(scanLoop); }, 1200);
 }
 function stopScan(){ if(state.scanStream){ state.scanStream.getTracks().forEach(t=>t.stop()); state.scanStream=null; } }
@@ -1775,6 +1816,7 @@ function renderMisRetos(){
 function openCrearRetoModal(){
   const myId = state.currentProfile.id;
   const others = activeStudents().filter(s=>s.id!==myId);
+  const days = Object.keys(SCHEDULE_BY_DAY);
   const modal=document.createElement('div'); modal.className='overlay';
   modal.innerHTML=`<div class="sheet">
     <div class="sheet-head"><h3>Lanzar un reto</h3><button class="close-x" onclick="closeModal()">✕</button></div>
@@ -1787,12 +1829,21 @@ function openCrearRetoModal(){
     <div class="field" id="rt_opponent_wrap"><label>¿A quién retas?</label>
       <select id="rt_opponent">${others.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}</select>
     </div>
-    <div class="field"><label>Horario propuesto</label>
-      <select id="rt_slot">${TIME_SLOTS.map(t=>`<option value="${t.key}">${t.label}</option>`).join('')}</select>
+    <div class="field"><label>Día</label>
+      <select id="rt_day" onchange="updateRetoTimeOptions()">${days.map(d=>`<option value="${d}">${d}</option>`).join('')}</select>
+    </div>
+    <div class="field"><label>Horario</label>
+      <select id="rt_time"></select>
     </div>
     <button class="btn btn-primary btn-block" onclick="crearReto()">Lanzar reto</button>
   </div>`;
   document.body.appendChild(modal);
+  updateRetoTimeOptions();
+}
+function updateRetoTimeOptions(){
+  const day = document.getElementById('rt_day').value;
+  const times = SCHEDULE_BY_DAY[day] || [];
+  document.getElementById('rt_time').innerHTML = times.map(t=>`<option value="${t}">${t}</option>`).join('');
 }
 function toggleRetoOpponentField(){
   const type = document.getElementById('rt_type').value;
@@ -1800,7 +1851,9 @@ function toggleRetoOpponentField(){
 }
 async function crearReto(){
   const type = document.getElementById('rt_type').value;
-  const timeSlot = document.getElementById('rt_slot').value;
+  const day = document.getElementById('rt_day').value;
+  const time = document.getElementById('rt_time').value;
+  const timeSlot = slotKey(day, time);
   const opponentId = type==='especifico' ? document.getElementById('rt_opponent').value : null;
   const row = {
     challenger_id: state.currentProfile.id, opponent_id: opponentId, type, time_slot: timeSlot,
