@@ -264,8 +264,31 @@ const SCHEDULE_BY_DAY = {
   'Domingo': ['10:00 am'],
 };
 function slotKey(day, time){ return day+'|'+time; }
-function slotLabel(key){ if(!key) return ''; const [day,time]=key.split('|'); return day+' · '+time; }
+/* Códigos viejos de horario (de antes de rediseñar por día+hora) — se conservan
+   solo para poder mostrar bien los retos de prueba creados en ese momento. */
+const LEGACY_SLOT_LABELS = {
+  lmv_0830: 'Lunes, Miércoles y Viernes · 8:30 am',
+  mj_1000: 'Martes y Jueves · 10:00 am',
+  lj_1930: 'Lunes a Jueves · 7:30 pm',
+  lj_2030: 'Lunes a Jueves · 8:30 pm',
+  v_2000: 'Viernes · 8:00 pm',
+  sd_1000: 'Sábado y Domingo · 10:00 am',
+};
+function slotLabel(key){
+  if(!key) return '';
+  if(LEGACY_SLOT_LABELS[key]) return LEGACY_SLOT_LABELS[key];
+  if(!key.includes('|')) return key;
+  const [day,time]=key.split('|');
+  return day+' · '+time;
+}
 const DAY_NAMES = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+/* IMPORTANTE: nunca calcular "la fecha de hoy" convirtiendo a texto ISO en UTC —
+   eso da la fecha en Greenwich, no en la hora local de México, y por la tarde/noche ya
+   marca el día siguiente por error. Esta función sí usa la fecha local del dispositivo. */
+function todayLocalStr(d){
+  const dt = d || new Date();
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+}
 function todayDayName(){ return DAY_NAMES[new Date().getDay()]; }
 function monthNavHTML(){
   const isCurrent = monthKey(state.monthCursor)===todayKey();
@@ -542,7 +565,7 @@ function goSetPin(){
     id: uid(), name,
     phone: document.getElementById('reg_phone').value.trim(),
     belt: document.getElementById('reg_belt').value,
-    joinDate: new Date().toISOString().slice(0,10),
+    joinDate: todayLocalStr(),
     photo: window._regPhoto || '',
     birthDate: document.getElementById('reg_birth').value,
     weight: document.getElementById('reg_weight').value,
@@ -656,6 +679,7 @@ async function setStudentTab(t){
     const [a,s] = await Promise.all([safeGet('attendance'), safeGet('students')]);
     if(a) state.attendance = a;
     if(s) state.students = s;
+    if(t==='retos') await loadRetos();
     if(state.tab===t) render();
   }
 }
@@ -722,7 +746,7 @@ function computeStreak(studentId, restDay){
   let streak=0, cursor=new Date(); cursor.setHours(0,0,0,0);
   let first=true, guard=0;
   while(guard++<730){
-    const key=cursor.toISOString().slice(0,10);
+    const key=todayLocalStr(cursor);
     const dow=cursor.getDay();
     const attended=mine.has(key);
     if(first && !attended){ first=false; cursor.setDate(cursor.getDate()-1); continue; }
@@ -744,8 +768,8 @@ function currentWeekStatus(studentId, restDay){
   let weekCount=0;
   for(let i=0;i<7;i++){
     const d=new Date(monday); d.setDate(monday.getDate()+i);
-    const key=d.toISOString().slice(0,10);
-    const isToday = key===today.toISOString().slice(0,10);
+    const key=todayLocalStr(d);
+    const isToday = key===todayLocalStr(today);
     const isFuture = d>today;
     const n = counts[key]||0;
     let status;
@@ -843,7 +867,7 @@ function renderInicio(c){
   const activos=activeStudents().length;
   let morosos=0, alDia=0;
   activeStudents().forEach(s=>{ const st=computeLiveStatus(s); if(st==='moroso') morosos++; if(st==='pagado') alDia++; });
-  const todayStr=new Date().toISOString().slice(0,10);
+  const todayStr=todayLocalStr();
   const hoyAsistencia = state.attendance.filter(a=>a.date===todayStr).length;
   const ingresosMes = state.payments.filter(p=>p.month===todayKey() && p.status==='pagado').reduce((s,p)=>s+Number(p.amount||0),0);
   const gastosMes = state.expenses.filter(e=>e.month===todayKey()).reduce((s,e)=>s+Number(e.amount||0),0);
@@ -929,7 +953,7 @@ function renderAlumnos(c){
   `;
 }
 function openStudentForm(existing){
-  const s = existing || {id:uid(), name:'', phone:'', instagram:'', belt:'Blanco', joinDate:new Date().toISOString().slice(0,10), photo:'', role:'student', birthDate:'', weight:'', titles:'', membershipType:'regular', membershipNote:''};
+  const s = existing || {id:uid(), name:'', phone:'', instagram:'', belt:'Blanco', joinDate:todayLocalStr(), photo:'', role:'student', birthDate:'', weight:'', titles:'', membershipType:'regular', membershipNote:''};
   const isNew = !existing;
   const modal=document.createElement('div'); modal.className='overlay';
   modal.innerHTML=`<div class="sheet">
@@ -1161,7 +1185,7 @@ async function approveComprobante(id, studentId, month){
     let p = arr.find(x=>x.studentId===studentId && x.month===month);
     if(!p){ p={id:uid(), studentId, month}; arr.push(p); }
     p.status='pagado'; p.amount = amount!=='' ? Number(amount) : (p.amount||0);
-    p.paidDate = new Date().toISOString().slice(0,10);
+    p.paidDate = todayLocalStr();
   });
   if(!result) return;
   const { error } = await sb.from('comprobantes').update({status:'aprobado'}).eq('id', id);
@@ -1186,7 +1210,7 @@ async function setPayment(studentId,mKey,status){
     let p=arr.find(x=>x.studentId===studentId && x.month===mKey);
     if(!p){ p={id:uid(), studentId, month:mKey}; arr.push(p); }
     p.status=status; p.amount = amount!=='' ? Number(amount) : (p.amount||0);
-    p.paidDate = status==='pagado' ? new Date().toISOString().slice(0,10) : p.paidDate;
+    p.paidDate = status==='pagado' ? todayLocalStr() : p.paidDate;
   });
   if(!result) return;
   render(); showToast('Pago actualizado');
@@ -1265,7 +1289,7 @@ function switchScan(mode){ stopScan(); state.scanMode=mode; render(); }
 const MAX_SESSIONS_PER_DAY = 3;
 function renderManualAttendance(){
   const area=document.getElementById('attArea');
-  const todayStr=new Date().toISOString().slice(0,10);
+  const todayStr=todayLocalStr();
   const todayRecords = state.attendance.filter(a=>a.date===todayStr);
   const todayClasses = SCHEDULE_BY_DAY[todayDayName()] || [];
   if(!state.attendanceClass){ area.innerHTML = emptyBlock('Sin clase seleccionada','Elige la clase de hoy arriba para poder registrar asistencia'); return; }
@@ -1285,7 +1309,7 @@ function renderManualAttendance(){
 }
 async function markAttendance(studentId){
   if(!state.attendanceClass){ showToast('Selecciona la clase de hoy primero', true); return; }
-  const todayStr=new Date().toISOString().slice(0,10);
+  const todayStr=todayLocalStr();
   const forStudent = state.attendance.filter(a=>a.studentId===studentId && a.date===todayStr);
   if(forStudent.some(a=>a.className===state.attendanceClass)){ showToast('Ya está registrado en esta clase hoy'); return; }
   if(forStudent.length>=MAX_SESSIONS_PER_DAY){ showToast('Ya alcanzó el máximo de '+MAX_SESSIONS_PER_DAY+' clases hoy'); return; }
@@ -1338,7 +1362,7 @@ function scanLoop(){
 }
 async function handleScanHit(studentId){
   const s=state.students.find(x=>x.id===studentId);
-  const todayStr=new Date().toISOString().slice(0,10);
+  const todayStr=todayLocalStr();
   if(!s){ showToast('Código no reconocido', true); setTimeout(()=>requestAnimationFrame(scanLoop),900); return; }
   if(!state.attendanceClass){ showToast('Selecciona la clase de hoy primero', true); setTimeout(()=>{ if(state.scanMode) requestAnimationFrame(scanLoop); }, 1200); return; }
   const forStudent = state.attendance.filter(a=>a.studentId===studentId && a.date===todayStr);
@@ -1380,7 +1404,7 @@ async function saveLead(){
   const name=document.getElementById('l_name').value.trim();
   if(!name){ showToast('Escribe un nombre', true); return; }
   const phone=document.getElementById('l_phone').value.trim(), notes=document.getElementById('l_notes').value.trim();
-  const result = await saveListSafely('leads', arr=>arr.push({id:uid(), name, phone, notes, date:new Date().toISOString().slice(0,10), status:'nuevo'}));
+  const result = await saveListSafely('leads', arr=>arr.push({id:uid(), name, phone, notes, date:todayLocalStr(), status:'nuevo'}));
   if(!result) return;
   closeModal(); render(); showToast('Lead guardado');
 }
@@ -1447,7 +1471,7 @@ async function savePost(){
   const title=document.getElementById('p_title').value.trim();
   if(!title){ showToast('Escribe un título', true); return; }
   const type=document.getElementById('p_type').value, body=document.getElementById('p_body').value.trim(), photo=window._postPhoto||'';
-  const result = await saveListSafely('posts', arr=>arr.push({id:uid(), type, title, body, photo, date:new Date().toISOString().slice(0,10), reactions:{likes:[],asistire:[]}}));
+  const result = await saveListSafely('posts', arr=>arr.push({id:uid(), type, title, body, photo, date:todayLocalStr(), reactions:{likes:[],asistire:[]}}));
   if(!result) return;
   closeModal(); render(); showToast('Publicado en el muro');
 }
@@ -1511,7 +1535,7 @@ function renderPerfilAlumno(c){
   const s = state.students.find(x=>x.id===state.currentProfile.id) || state.currentProfile;
   const now=new Date();
   const startOfWeek=new Date(now); startOfWeek.setDate(now.getDate()-now.getDay());
-  const startOfWeekStr=startOfWeek.toISOString().slice(0,10);
+  const startOfWeekStr=todayLocalStr(startOfWeek);
   const startOfMonthStr=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-01';
   const mine = state.attendance.filter(a=>a.studentId===s.id);
   const semana = mine.filter(a=>a.date>=startOfWeekStr).length;
@@ -2009,7 +2033,7 @@ async function sendComment(){
   const category = document.getElementById('c_cat').value;
   const topic = category==='tecnico' ? document.getElementById('c_topic').value : '';
   const authorId=state.currentProfile.id, authorName=state.currentProfile.name;
-  await saveListSafely('comments', arr=>arr.push({id:uid(), authorId, authorName, category, topic, message:msg, date:new Date().toISOString().slice(0,10)}));
+  await saveListSafely('comments', arr=>arr.push({id:uid(), authorId, authorName, category, topic, message:msg, date:todayLocalStr()}));
   render(); showToast('Comentario enviado');
 }
 function openBuzonQuickCompose(){
@@ -2035,7 +2059,7 @@ async function sendQuickComment(){
   const category = document.getElementById('qc_cat').value;
   const topic = category==='tecnico' ? document.getElementById('qc_topic').value : '';
   const authorId=state.currentProfile.id, authorName=state.currentProfile.name;
-  await saveListSafely('comments', arr=>arr.push({id:uid(), authorId, authorName, category, topic, message:msg, date:new Date().toISOString().slice(0,10)}));
+  await saveListSafely('comments', arr=>arr.push({id:uid(), authorId, authorName, category, topic, message:msg, date:todayLocalStr()}));
   closeModal(); showToast('Comentario enviado');
   if(state.tab==='buzon') render();
 }
