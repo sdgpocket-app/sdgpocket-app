@@ -238,7 +238,7 @@
 let state = {
   auth: 'chooser', // chooser | adminLogin | studentPick | studentRegister | studentPin | admin | student
   tab: 'inicio',
-  students: [], payments: [], attendance: [], leads: [], posts: [], comments: [], settings: {}, expenses: [], comprobantes: [], retos: [], retosView: 'ranking',
+  students: [], payments: [], attendance: [], leads: [], posts: [], comments: [], settings: {}, expenses: [], comprobantes: [], retos: [], retosView: 'ranking', suscripciones: [],
   loaded: false,
   monthCursor: new Date(),
   scanMode: false, scanStream: null, attendanceClass: null, miSuscripcion: null,
@@ -327,7 +327,15 @@ async function reloadPrivateData(){
     ]);
     state.payments=p||[]; state.leads=l||[]; state.settings=se||{}; state.expenses=ex||[];
     await loadComprobantes();
+    await loadSuscripciones();
   }catch(e){ console.error(e); showToast('No se pudieron cargar los datos privados', true); }
+}
+async function loadSuscripciones(){
+  try{
+    const { data, error } = await sb.from('suscripciones').select('*').order('created_at', {ascending:false});
+    if(error) throw error;
+    state.suscripciones = data || [];
+  }catch(e){ console.error(e); state.suscripciones = state.suscripciones || []; }
 }
 async function loadComprobantes(){
   try{
@@ -1120,14 +1128,46 @@ function renderPagos(c){
       <button class="${!state.pagosView||state.pagosView==='cobros'?'active':''}" onclick="setPagosView('cobros')">Cobros</button>
       <button class="${state.pagosView==='finanzas'?'active':''}" onclick="setPagosView('finanzas')">Finanzas</button>
       <button class="${state.pagosView==='comprobantes'?'active':''}" onclick="setPagosView('comprobantes')">Comprobantes${pendCount>0?' ('+pendCount+')':''}</button>
+      <button class="${state.pagosView==='domiciliacion'?'active':''}" onclick="setPagosView('domiciliacion')">Domiciliación</button>
     </div>
     <div id="pagosArea"></div>
   `;
   if(state.pagosView==='finanzas') renderFinanzas();
   else if(state.pagosView==='comprobantes') renderComprobantesReview();
+  else if(state.pagosView==='domiciliacion') renderDomiciliacionAdmin();
   else renderCobros();
 }
 function setPagosView(v){ state.pagosView=v; render(); }
+function renderDomiciliacionAdmin(){
+  const area=document.getElementById('pagosArea');
+  const byStudent = {};
+  (state.suscripciones||[]).forEach(sub=>{
+    const existing = byStudent[sub.student_id];
+    if(!existing || (sub.created_at||'') > (existing.created_at||'')) byStudent[sub.student_id] = sub;
+  });
+  const statusLabel = (status)=>{
+    if(!status) return {text:'Sin domiciliar', cls:'status-pausado'};
+    if(status==='authorized' || status.startsWith('pago_approved')) return {text:'Activa ✓', cls:'status-pagado'};
+    if(status==='pending') return {text:'Pendiente de autorizar', cls:'status-pendiente'};
+    if(status==='cancelled') return {text:'Cancelada', cls:'status-moroso'};
+    if(status==='paused') return {text:'Pausada', cls:'status-pausado'};
+    if(status.startsWith('pago_rejected') || status.startsWith('pago_cancelled')) return {text:'Último cobro falló', cls:'status-moroso'};
+    return {text:status, cls:'status-pausado'};
+  };
+  area.innerHTML = activeStudents().length===0 ? emptyBlock('Sin alumnos','Agrega alumnos primero') :
+    activeStudents().map(s=>{
+      const sub = byStudent[s.id];
+      const st = statusLabel(sub ? sub.status : null);
+      return `<div class="card"><div class="student-row">
+        <div class="avatar">${s.photo?`<img src="${s.photo}">`:initials(s.name)}</div>
+        <div style="flex:1;">
+          <div class="s-name">${s.name}</div>
+          <div class="s-meta">${s.email || 'Sin correo registrado'}${s.membershipFee?' · $'+s.membershipFee+'/mes':''}</div>
+        </div>
+        <span class="status-pill ${st.cls}">${st.text}</span>
+      </div></div>`;
+    }).join('');
+}
 function renderCobros(){
   const area=document.getElementById('pagosArea');
   const mKey=monthKey(state.monthCursor);
@@ -1508,7 +1548,8 @@ function renderDomiciliacionEstado(s){
   }
   if(isPending){
     return `<div class="s-meta" style="margin-bottom:10px;">Tienes una solicitud pendiente de autorizar.</div>
-      <button class="btn btn-primary btn-block" onclick="window.open('${sub.init_point}','_blank')">Continuar autorización</button>`;
+      <button class="btn btn-primary btn-block" style="margin-bottom:8px;" onclick="window.open('${sub.init_point}','_blank')">Continuar autorización</button>
+      <button class="btn btn-ghost btn-sm btn-block" onclick="domiciliarPago()">Solicitar una nueva domiciliación</button>`;
   }
   return `<div class="s-meta" style="margin-bottom:10px;">Autoriza el cobro automático mensual y olvídate de subir comprobantes cada mes.</div>
     <button class="btn btn-primary btn-block" onclick="domiciliarPago()">Domiciliar mi pago</button>`;
