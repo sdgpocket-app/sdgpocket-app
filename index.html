@@ -225,6 +225,7 @@
   </div>
   <div class="subtitle">
     <span id="topSubtitle">Panel de administración</span>
+    <button class="logout-link" id="refreshBtn" style="display:none;margin-right:10px;" onclick="refreshCurrentView()">🔄 Actualizar</button>
     <button class="logout-link" id="logoutBtn" style="display:none;" onclick="logout()">Salir</button>
   </div>
 </div>
@@ -410,13 +411,14 @@ function render(){
   const fab = document.getElementById('fabBtn');
   const tabbar = document.getElementById('tabbar');
   const logoutBtn = document.getElementById('logoutBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
   const topbar = document.querySelector('.topbar');
   fab.style.display='none'; fab.onclick=null;
 
-  if(!state.loaded){ c.innerHTML='<div class="empty"><p>Cargando…</p></div>'; tabbar.style.display='none'; logoutBtn.style.display='none'; return; }
+  if(!state.loaded){ c.innerHTML='<div class="empty"><p>Cargando…</p></div>'; tabbar.style.display='none'; logoutBtn.style.display='none'; refreshBtn.style.display='none'; return; }
 
   if(['chooser','adminLogin','studentPick','studentRegister','studentPin'].includes(state.auth)){
-    tabbar.style.display='none'; logoutBtn.style.display='none';
+    tabbar.style.display='none'; logoutBtn.style.display='none'; refreshBtn.style.display='none';
     topbar.classList.remove('compact');
     document.getElementById('gateBg').style.display='block';
     document.getElementById('topSubtitle').textContent = 'Bienvenido';
@@ -427,6 +429,7 @@ function render(){
 
   topbar.classList.add('compact');
   logoutBtn.style.display='inline';
+  refreshBtn.style.display='inline';
   tabbar.style.display='flex';
   if(state.auth==='admin'){ fab.innerHTML='+'; fab.style.fontSize=''; renderAdminTabbar(); renderAdminTab(c,fab); }
   else {
@@ -2168,6 +2171,43 @@ async function sendQuickComment(){
   if(state.tab==='buzon') render();
 }
 
+/* Refresca los datos relevantes según en dónde esté parado el usuario, sin recargar
+   toda la app. Se usa tanto con el botón manual como al volver de segundo plano. */
+let _lastAutoRefresh = 0;
+async function refreshCurrentView(silent){
+  const now = Date.now();
+  if(now - _lastAutoRefresh < 1500) return; // evita refrescos duplicados casi simultáneos
+  _lastAutoRefresh = now;
+  if(state.auth==='admin'){
+    const [s,a,po,co] = await Promise.all([safeGet('students'), safeGet('attendance'), safeGet('posts'), safeGet('comments')]);
+    if(s) state.students=s; if(a) state.attendance=a; if(po) state.posts=po; if(co) state.comments=co;
+    await loadRetos();
+    await reloadPrivateData();
+    render();
+    if(!silent) showToast('Datos actualizados');
+  } else if(state.auth==='student'){
+    const [a,s] = await Promise.all([safeGet('attendance'), safeGet('students')]);
+    if(a) state.attendance = a;
+    if(s) state.students = s;
+    if(state.tab==='retos') await loadRetos();
+    if(state.tab==='perfil') await loadMiSuscripcion();
+    render();
+    if(!silent) showToast('Datos actualizados');
+  }
+}
+/* En iOS/Safari, cuando la app pasa a segundo plano el navegador congela el código;
+   al volver a primer plano, refrescamos automáticamente sin que el usuario tenga
+   que cerrar y volver a abrir la app por completo. */
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='visible' && state.loaded && (state.auth==='admin' || state.auth==='student')){
+    refreshCurrentView(true);
+  }
+});
+window.addEventListener('focus', ()=>{
+  if(state.loaded && (state.auth==='admin' || state.auth==='student')){
+    refreshCurrentView(true);
+  }
+});
 loadAll();
 </script>
 </body>
