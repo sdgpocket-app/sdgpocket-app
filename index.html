@@ -46,13 +46,13 @@
   h1,h2,h3{font-family:'Space Grotesk',sans-serif;font-weight:700;letter-spacing:-.01em;margin:0;text-transform:uppercase;}
   .mono{font-family:'IBM Plex Mono',monospace;}
 
-  .topbar{background:#ffffff;color:var(--ink);padding:16px 18px 14px;position:relative;overflow:hidden;border-bottom:3px solid var(--petrol);transition:padding .25s ease;}
+  .topbar{background:#ffffff;color:var(--ink);padding:calc(16px + env(safe-area-inset-top)) 18px 14px;position:relative;overflow:hidden;border-bottom:3px solid var(--petrol);transition:padding .25s ease;}
   .brand-row{display:flex;align-items:center;justify-content:center;position:relative;z-index:1;transition:all .25s ease;}
   .brand-logo{max-width:210px;width:100%;height:auto;display:block;transition:max-width .25s ease;}
   .topbar .subtitle{display:none;}
   .logout-link{color:var(--petrol);font-size:11px;font-weight:700;text-decoration:underline;background:none;border:none;}
 
-  .topbar.compact{padding:10px 16px 8px;}
+  .topbar.compact{padding:calc(10px + env(safe-area-inset-top)) 16px 8px;}
   .topbar.compact .brand-row{justify-content:flex-start;}
   .topbar.compact .brand-logo{max-width:88px;}
   .topbar.compact .subtitle{display:flex;align-items:center;justify-content:space-between;margin-top:4px;font-size:11px;}
