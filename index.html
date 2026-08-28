@@ -241,7 +241,7 @@ let state = {
   students: [], payments: [], attendance: [], leads: [], posts: [], comments: [], settings: {}, expenses: [], comprobantes: [], retos: [], retosView: 'ranking',
   loaded: false,
   monthCursor: new Date(),
-  scanMode: false, scanStream: null, attendanceClass: null,
+  scanMode: false, scanStream: null, attendanceClass: null, miSuscripcion: null,
   pinBuffer: '',
   pendingProfile: null,
   currentProfile: null,
@@ -626,12 +626,14 @@ async function checkStudentPin(){
     state.auth='student'; state.tab='perfil'; state.pinBuffer='';
     render();
     showToast('¡Bienvenido, '+p.name+'!');
+    await loadMiSuscripcion(); render();
   } else {
     const h = await hashPin(state.pinBuffer);
     if(h === p.pinHash){
       state.currentProfile = state.students.find(x=>x.id===p.id);
       state.auth='student'; state.tab='perfil'; state.pinBuffer='';
       render();
+      await loadMiSuscripcion(); render();
     } else {
       showToast('PIN incorrecto', true);
       setTimeout(()=>{ state.pinBuffer=''; render(); }, 500);
@@ -680,6 +682,7 @@ async function setStudentTab(t){
     if(a) state.attendance = a;
     if(s) state.students = s;
     if(t==='retos') await loadRetos();
+    if(t==='perfil') await loadMiSuscripcion();
     if(state.tab===t) render();
   }
 }
@@ -953,7 +956,7 @@ function renderAlumnos(c){
   `;
 }
 function openStudentForm(existing){
-  const s = existing || {id:uid(), name:'', phone:'', instagram:'', belt:'Blanco', joinDate:todayLocalStr(), photo:'', role:'student', birthDate:'', weight:'', titles:'', membershipType:'regular', membershipNote:''};
+  const s = existing || {id:uid(), name:'', phone:'', email:'', instagram:'', belt:'Blanco', joinDate:todayLocalStr(), photo:'', role:'student', birthDate:'', weight:'', titles:'', membershipType:'regular', membershipNote:'', membershipFee:''};
   const isNew = !existing;
   const modal=document.createElement('div'); modal.className='overlay';
   modal.innerHTML=`<div class="sheet">
@@ -965,6 +968,8 @@ function openStudentForm(existing){
     </div>
     <div class="field"><label>Nombre completo</label><input id="f_name" value="${s.name}" placeholder="Ej. Ana Torres"></div>
     <div class="field"><label>Teléfono</label><input id="f_phone" value="${s.phone}" placeholder="55 1234 5678"></div>
+    <div class="field"><label>Correo (necesario para domiciliar pago)</label><input id="f_email" type="email" value="${s.email||''}" placeholder="alumno@correo.com"></div>
+    <div class="field"><label>Cuota mensual (MXN)</label><input id="f_fee" type="number" inputmode="decimal" value="${s.membershipFee||''}" placeholder="800"></div>
     <div class="field"><label>Instagram (opcional)</label><input id="f_instagram" value="${s.instagram||''}" placeholder="@usuario"></div>
     <div class="row-2">
       <div class="field"><label>Cinturón</label><select id="f_belt">${['Blanco','Azul','Morado','Marrón','Negro'].map(b=>`<option ${s.belt===b?'selected':''}>${b}</option>`).join('')}</select></div>
@@ -1016,6 +1021,8 @@ async function saveStudent(id, isNew){
   const data = {
     id, name,
     phone:document.getElementById('f_phone').value.trim(),
+    email:document.getElementById('f_email').value.trim(),
+    membershipFee:sanitizeAmount(document.getElementById('f_fee').value),
     instagram:document.getElementById('f_instagram').value.trim().replace(/^@/,''),
     belt:document.getElementById('f_belt').value,
     joinDate:document.getElementById('f_join').value,
@@ -1481,6 +1488,51 @@ async function deletePost(id){
 }
 
 /* ============ PERFIL ALUMNO ============ */
+async function loadMiSuscripcion(){
+  if(!state.currentProfile) return;
+  try{
+    const { data, error } = await sb.from('suscripciones')
+      .select('*').eq('student_id', state.currentProfile.id)
+      .order('created_at', {ascending:false}).limit(1);
+    if(error) throw error;
+    state.miSuscripcion = (data && data[0]) || null;
+  }catch(e){ console.error(e); state.miSuscripcion = null; }
+}
+function renderDomiciliacionEstado(s){
+  const sub = state.miSuscripcion;
+  const isActive = sub && (sub.status==='authorized' || (sub.status||'').startsWith('pago_approved'));
+  const isPending = sub && sub.status==='pending';
+  if(isActive){
+    return `<div class="s-meta" style="color:var(--primary);font-weight:600;margin-bottom:4px;">✓ Domiciliación activa</div>
+      <div class="s-meta">Se te cobra automáticamente cada mes. Ya no necesitas subir comprobante.</div>`;
+  }
+  if(isPending){
+    return `<div class="s-meta" style="margin-bottom:10px;">Tienes una solicitud pendiente de autorizar.</div>
+      <button class="btn btn-primary btn-block" onclick="window.open('${sub.init_point}','_blank')">Continuar autorización</button>`;
+  }
+  return `<div class="s-meta" style="margin-bottom:10px;">Autoriza el cobro automático mensual y olvídate de subir comprobantes cada mes.</div>
+    <button class="btn btn-primary btn-block" onclick="domiciliarPago()">Domiciliar mi pago</button>`;
+}
+async function domiciliarPago(){
+  const s = state.students.find(x=>x.id===state.currentProfile.id) || state.currentProfile;
+  if(!s.email){
+    showToast('Primero agrega tu correo en "Editar mis datos"', true);
+    return;
+  }
+  if(!s.membershipFee){
+    showToast('Tu cuota mensual todavía no está configurada. Pídele al admin que la agregue en tu perfil.', true);
+    return;
+  }
+  showToast('Preparando tu domiciliación...');
+  const { data, error } = await sb.functions.invoke('crear-suscripcion', {
+    body: { studentId: s.id, studentName: s.name, studentEmail: s.email, amount: s.membershipFee }
+  });
+  if(error){ showToast('No se pudo crear la domiciliación: '+error.message, true); return; }
+  if(data && data.error){ showToast('Mercado Pago rechazó la solicitud: '+(data.error), true); return; }
+  await loadMiSuscripcion();
+  render();
+  if(data && data.init_point){ window.open(data.init_point, '_blank'); }
+}
 function openComprobanteModal(){
   const d = new Date();
   const opts=[];
@@ -1566,6 +1618,10 @@ function renderPerfilAlumno(c){
       <div class="s-meta" style="margin-bottom:10px;">¿Ya pagaste? Sube tu comprobante y el admin lo revisará y aprobará.</div>
       <button class="btn btn-primary btn-block" onclick="openComprobanteModal()">Subir comprobante de pago</button>
     </div>
+    <div class="card">
+      <div class="s-name" style="margin-bottom:4px;">Domiciliación automática</div>
+      ${renderDomiciliacionEstado(s)}
+    </div>
     ${titleList.length?`<div class="card">${titleList.map(t=>`<div class="att-history-item"><span>🏅 ${t}</span></div>`).join('')}</div>`:''}
     ${retosBadgesFor(s.id).length?`<div class="card">${retosBadgesFor(s.id).map(b=>`<div class="att-history-item"><span>${b}</span></div>`).join('')}</div>`:''}
 
@@ -1624,6 +1680,7 @@ function openMyEditForm(){
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('myPhotoInput').click()">Cambiar foto</button></div>
     </div>
     <div class="field"><label>Teléfono</label><input id="my_phone" value="${s.phone||''}"></div>
+    <div class="field"><label>Correo (necesario para domiciliar tu pago)</label><input id="my_email" type="email" value="${s.email||''}" placeholder="tucorreo@correo.com"></div>
     <div class="field"><label>Instagram (opcional)</label><input id="my_instagram" placeholder="@tuusuario" value="${s.instagram||''}"></div>
     <div class="field"><label>Peso (kg)</label><input type="number" inputmode="decimal" id="my_weight" value="${s.weight||''}"></div>
     <div class="field"><label>Títulos (opcional, uno por línea)</label><textarea id="my_titles" rows="2">${s.titles||''}</textarea></div>
@@ -1653,6 +1710,7 @@ function handleMyPhoto(input){
 }
 async function saveMyProfile(){
   const phone = document.getElementById('my_phone').value.trim();
+  const email = document.getElementById('my_email').value.trim();
   const instagram = document.getElementById('my_instagram').value.trim().replace(/^@/,'');
   const weight = document.getElementById('my_weight').value;
   const titles = document.getElementById('my_titles').value.trim();
@@ -1660,7 +1718,7 @@ async function saveMyProfile(){
   const myId = state.currentProfile.id;
   const fresh = await saveListSafely('students', arr=>{
     const idx = arr.findIndex(x=>x.id===myId); if(idx<0) return;
-    arr[idx].phone = phone; arr[idx].instagram = instagram; arr[idx].weight = weight; arr[idx].titles = titles;
+    arr[idx].phone = phone; arr[idx].email = email; arr[idx].instagram = instagram; arr[idx].weight = weight; arr[idx].titles = titles;
     arr[idx].photo = photo || arr[idx].photo;
   });
   if(!fresh) return;
