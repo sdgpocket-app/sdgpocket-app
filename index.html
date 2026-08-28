@@ -1527,8 +1527,13 @@ async function domiciliarPago(){
   const { data, error } = await sb.functions.invoke('crear-suscripcion', {
     body: { studentId: s.id, studentName: s.name, studentEmail: s.email, amount: s.membershipFee }
   });
-  if(error){ showToast('No se pudo crear la domiciliación: '+error.message, true); return; }
-  if(data && data.error){ showToast('Mercado Pago rechazó la solicitud: '+(data.error), true); return; }
+  if(error){
+    let detail = error.message || 'Error desconocido';
+    try{ if(error.context && error.context.json){ const body = await error.context.json(); detail = body.error ? (body.error+(body.detail?': '+JSON.stringify(body.detail):'')) : JSON.stringify(body); } }catch(e){}
+    showToast('No se pudo crear la domiciliación: '+detail, true);
+    return;
+  }
+  if(data && data.error){ showToast('Mercado Pago rechazó la solicitud: '+(data.error)+(data.detail?': '+JSON.stringify(data.detail):''), true); return; }
   await loadMiSuscripcion();
   render();
   if(data && data.init_point){ window.open(data.init_point, '_blank'); }
