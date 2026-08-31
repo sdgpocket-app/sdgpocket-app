@@ -1019,6 +1019,7 @@ function openStudentForm(existing){
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('photoInput').click()">Subir foto</button></div>
     </div>
     <div class="field"><label>Nombre completo</label><input id="f_name" value="${s.name}" placeholder="Ej. Ana Torres"></div>
+    <div class="field"><label>Apodo (opcional)</label><input id="f_nickname" value="${s.nickname||''}" placeholder="Ej. El Tigre"></div>
     <div class="field"><label>Teléfono</label><input id="f_phone" value="${s.phone}" placeholder="55 1234 5678"></div>
     <div class="field"><label>Correo (necesario para domiciliar pago)</label><input id="f_email" type="email" value="${s.email||''}" placeholder="alumno@correo.com"></div>
     <div class="field"><label>Cuota mensual (MXN)</label><input id="f_fee" type="number" inputmode="decimal" value="${s.membershipFee||''}" placeholder="800"></div>
@@ -1072,6 +1073,7 @@ async function saveStudent(id, isNew){
   const pinHash = pin ? await hashPin(pin) : (existing?existing.pinHash:null) || await hashPin('0000');
   const data = {
     id, name,
+    nickname:document.getElementById('f_nickname').value.trim(),
     phone:document.getElementById('f_phone').value.trim(),
     email:document.getElementById('f_email').value.trim(),
     membershipFee:sanitizeAmount(document.getElementById('f_fee').value),
@@ -1713,7 +1715,7 @@ function renderPerfilAlumno(c){
     <div class="section-head"><h2>Mi perfil</h2></div><div class="section-underline"></div>
     <div class="card" style="text-align:center;">
       <div class="avatar" style="width:74px;height:74px;font-size:24px;margin:0 auto 8px;">${s.photo?`<img src="${s.photo}">`:initials(s.name)}</div>
-      <div class="s-name" style="font-size:16px;">${s.name}</div>
+      <div class="s-name" style="font-size:16px;">${s.name}${s.nickname?` <span style="font-weight:400;">"${s.nickname}"</span>`:''}</div>
       <span class="belt-pill">${s.belt}</span>
       <div class="s-meta" style="margin-top:8px;">Alumno desde ${fmtDate(s.joinDate)}</div>
       <div class="s-meta">${age!==null?age+' años':''}${s.weight?' · '+s.weight+' kg':''}</div>
@@ -1792,6 +1794,7 @@ function openMyEditForm(){
       <div><input type="file" accept="image/*" id="myPhotoInput" style="display:none" onchange="handleMyPhoto(this)">
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('myPhotoInput').click()">Cambiar foto</button></div>
     </div>
+    <div class="field"><label>Apodo (opcional)</label><input id="my_nickname" value="${s.nickname||''}" placeholder="Ej. El Tigre"></div>
     <div class="field"><label>Teléfono</label><input id="my_phone" value="${s.phone||''}"></div>
     <div class="field"><label>Correo (necesario para domiciliar tu pago)</label><input id="my_email" type="email" value="${s.email||''}" placeholder="tucorreo@correo.com"></div>
     <div class="field"><label>Instagram (opcional)</label><input id="my_instagram" placeholder="@tuusuario" value="${s.instagram||''}"></div>
@@ -1822,6 +1825,7 @@ function handleMyPhoto(input){
   reader.readAsDataURL(file);
 }
 async function saveMyProfile(){
+  const nickname = document.getElementById('my_nickname').value.trim();
   const phone = document.getElementById('my_phone').value.trim();
   const email = document.getElementById('my_email').value.trim();
   const instagram = document.getElementById('my_instagram').value.trim().replace(/^@/,'');
@@ -1831,7 +1835,7 @@ async function saveMyProfile(){
   const myId = state.currentProfile.id;
   const fresh = await saveListSafely('students', arr=>{
     const idx = arr.findIndex(x=>x.id===myId); if(idx<0) return;
-    arr[idx].phone = phone; arr[idx].email = email; arr[idx].instagram = instagram; arr[idx].weight = weight; arr[idx].titles = titles;
+    arr[idx].nickname = nickname; arr[idx].phone = phone; arr[idx].email = email; arr[idx].instagram = instagram; arr[idx].weight = weight; arr[idx].titles = titles;
     arr[idx].photo = photo || arr[idx].photo;
   });
   if(!fresh) return;
@@ -1850,7 +1854,7 @@ function renderCompaneros(c){
       const titleCount = (s.titles||'').split('\n').map(t=>t.trim()).filter(Boolean).length;
       return `<div class="card" style="cursor:pointer;" onclick="openPeerProfile('${s.id}')"><div class="student-row">
       <div class="avatar">${s.photo?`<img src="${s.photo}">`:initials(s.name)}</div>
-      <div style="flex:1;"><div class="s-name">${s.name}</div><span class="belt-pill">${s.belt}</span>${titleCount?` <span class="s-meta">🏅 ${titleCount}</span>`:''}</div>
+      <div style="flex:1;"><div class="s-name">${s.name}${s.nickname?` <span class="s-meta">"${s.nickname}"</span>`:''}</div><span class="belt-pill">${s.belt}</span>${titleCount?` <span class="s-meta">🏅 ${titleCount}</span>`:''}</div>
       <span class="s-meta">🤝 ${(s.kudos||[]).length}</span>
     </div></div>`;}).join('')}
   `;
@@ -1862,7 +1866,7 @@ function openPeerProfile(id){
   const gaveKudos = (s.kudos||[]).includes(myId);
   const modal=document.createElement('div'); modal.className='overlay';
   modal.innerHTML=`<div class="sheet">
-    <div class="sheet-head"><h3>${s.name}</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="sheet-head"><h3>${s.name}${s.nickname?` "${s.nickname}"`:''}</h3><button class="close-x" onclick="closeModal()">✕</button></div>
     <div style="text-align:center;margin-bottom:14px;">
       <div class="avatar" style="width:74px;height:74px;font-size:24px;margin:0 auto 8px;">${s.photo?`<img src="${s.photo}">`:initials(s.name)}</div>
       <span class="belt-pill">${s.belt}</span>
@@ -2163,7 +2167,7 @@ async function cancelarReto(id){
   await loadRetos(); render();
 }
 function openReportarResultado(id){
-  const r = state.retos.find(x=>x.id===id); if(!r) return;
+  const r = state.retos.find(x=>String(x.id)===String(id)); if(!r) return;
   const myId = state.currentProfile.id;
   const otherId = r.challenger_id===myId ? r.opponent_id : r.challenger_id;
   const other = state.students.find(x=>x.id===otherId);
@@ -2176,7 +2180,7 @@ function openReportarResultado(id){
   document.body.appendChild(modal);
 }
 async function reportarResultado(id, winnerId){
-  const r = state.retos.find(x=>x.id===id); if(!r) return;
+  const r = state.retos.find(x=>String(x.id)===String(id)); if(!r) return;
   const myId = state.currentProfile.id;
   closeModal();
   if(!r.reported_winner_id){
