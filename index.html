@@ -2003,6 +2003,35 @@ function renderRetosAbiertos(){
     </div>`;
   }).join('');
 }
+const DAY_INDEX = {'Domingo':0,'Lunes':1,'Martes':2,'Miércoles':3,'Jueves':4,'Viernes':5,'Sábado':6};
+function parseSlotTime(timeStr){
+  const m = (timeStr||'').match(/(\d+):(\d+)\s*(am|pm)/i);
+  if(!m) return null;
+  let h = parseInt(m[1],10); const min = parseInt(m[2],10); const ampm = m[3].toLowerCase();
+  if(ampm==='pm' && h!==12) h+=12;
+  if(ampm==='am' && h===12) h=0;
+  return {h, m:min};
+}
+/* Calcula la fecha/hora real de la clase de un reto, a partir del día+hora guardado
+   y la fecha en que se creó el reto (busca la primera vez que ocurre ese día de la semana). */
+function retoScheduledDateTime(reto){
+  if(!reto.time_slot || !reto.time_slot.includes('|')) return null; // formato viejo, sin día — se trata como ya pasado
+  const [day, time] = reto.time_slot.split('|');
+  const dayIdx = DAY_INDEX[day];
+  const parsed = parseSlotTime(time);
+  if(dayIdx===undefined || !parsed || !reto.created_at) return null;
+  const created = new Date(reto.created_at);
+  const diff = (dayIdx - created.getDay() + 7) % 7;
+  const d = new Date(created);
+  d.setDate(created.getDate() + diff);
+  d.setHours(parsed.h, parsed.m, 0, 0);
+  return d;
+}
+function retoYaPaso(reto){
+  const dt = retoScheduledDateTime(reto);
+  if(!dt) return true; // sin fecha calculable (formato viejo) — no bloqueamos, se puede reportar
+  return new Date() >= dt;
+}
 function renderMisRetos(){
   const area=document.getElementById('retosArea');
   const myId = state.currentProfile.id;
@@ -2014,21 +2043,25 @@ function renderMisRetos(){
     const other = otherId ? state.students.find(x=>x.id===otherId) : null;
     const iAmChallenger = r.challenger_id===myId;
     let body='';
-    if(r.status==='pendiente' && !iAmChallenger){
+    const yaPaso = retoYaPaso(r);
+    if(r.status==='pendiente' && !iAmChallenger && !yaPaso){
       body = `<div class="s-meta" style="margin-bottom:8px;">${slotLabel(r.time_slot)}</div>
         <div style="display:flex;gap:6px;">
           <button class="btn btn-sm btn-primary" style="flex:1;" onclick="aceptarRetoEspecifico('${r.id}')">Aceptar</button>
           <button class="btn btn-sm btn-ghost" style="flex:1;" onclick="rechazarReto('${r.id}')">Rechazar</button>
         </div>`;
-    } else if(r.status==='pendiente' && iAmChallenger){
+    } else if(r.status==='pendiente' && iAmChallenger && !yaPaso){
       body = `<div class="s-meta" style="margin-bottom:8px;">${slotLabel(r.time_slot)} · Esperando respuesta</div>
         <button class="btn btn-ghost btn-sm btn-block" onclick="cancelarReto('${r.id}')">Cancelar reto</button>`;
     } else if(r.status==='abierto'){
       body = `<div class="s-meta" style="margin-bottom:8px;">${slotLabel(r.time_slot)} · Reto abierto, esperando que alguien lo tome</div>
         <button class="btn btn-ghost btn-sm btn-block" onclick="cancelarReto('${r.id}')">Cancelar reto</button>`;
+    } else if((r.status==='aceptado' || r.status==='pendiente') && otherId && yaPaso){
+      body = `<div class="s-meta" style="margin-bottom:8px;">${slotLabel(r.time_slot)} · Ya pasó la hora de la clase</div>
+        <button class="btn btn-primary btn-sm btn-block" onclick="openReportarResultado('${r.id}')">Reportar resultado</button>`;
     } else if(r.status==='aceptado'){
       body = `<div class="s-meta" style="margin-bottom:8px;">${slotLabel(r.time_slot)} · Programado</div>
-        <button class="btn btn-primary btn-sm btn-block" onclick="openReportarResultado('${r.id}')">Reportar resultado</button>`;
+        <div class="s-meta">Podrás reportar el resultado después de la hora de la clase.</div>`;
     } else if(r.status==='por_confirmar'){
       if(r.reported_by===myId){
         body = `<div class="s-meta">Reportaste que ganó ${r.reported_winner_id===myId?'tú':(other?other.name:'tu rival')}. Esperando que ${other?other.name:'tu rival'} confirme.</div>`;
