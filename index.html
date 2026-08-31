@@ -251,6 +251,46 @@ const GRACE_DAYS = 5;
 const SUPABASE_URL = 'https://dmvozfmzqbafphddkqyd.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtdm96Zm16cWJhZnBoZGRrcXlkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxNjQ2NzcsImV4cCI6MjEwMjc0MDY3N30.lyTszNuzpiP-0FC8htjHSaXXoNZto7FbLU45lept0Fw';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const VAPID_PUBLIC_KEY = 'BNjyfbThQAGZXNGhReeW8rN8Ll5sVEx1F88WkyS4AqDOP5eGljS7Ejac_-sGP4tjSASG_vje5grRXGoiv44NF6s';
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(e=>console.error('Error registrando service worker', e));
+}
+function urlBase64ToUint8Array(base64String){
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g,'+').replace(/_/g,'/');
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map(c=>c.charCodeAt(0)));
+}
+async function activarNotificaciones(ownerType, ownerId){
+  if(!('serviceWorker' in navigator) || !('PushManager' in window)){
+    showToast('Tu navegador no soporta notificaciones push. En iPhone/iPad, agrega la app a tu pantalla de inicio primero.', true);
+    return;
+  }
+  try{
+    const permission = await Notification.requestPermission();
+    if(permission!=='granted'){ showToast('No diste permiso para recibir notificaciones', true); return; }
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub){
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+      });
+    }
+    const subJson = sub.toJSON();
+    const { error } = await sb.from('push_subscriptions').insert({
+      owner_type: ownerType, owner_id: ownerId,
+      endpoint: subJson.endpoint, p256dh: subJson.keys.p256dh, auth_key: subJson.keys.auth
+    });
+    if(error){ showToast('No se pudo activar: '+error.message, true); return; }
+    showToast('🔔 ¡Notificaciones activadas!');
+  }catch(e){ console.error(e); showToast('No se pudieron activar las notificaciones', true); }
+}
+async function enviarNotificacion(targetType, targetId, tipo, title, body, url){
+  try{
+    await sb.functions.invoke('enviar-notificacion', { body: { targetType, targetId, tipo, title, body, url: url||'/' } });
+  }catch(e){ console.error('Error enviando notificación', e); }
+}
 
 /* Datos de comunidad (alumnos, asistencia, muro, buzón): tabla kv_shared.
    Datos de negocio (pagos, leads, gastos, contraseña admin): tabla kv_private. */
@@ -907,6 +947,7 @@ function renderInicio(c){
     <div class="card">
       <div class="s-meta" style="font-weight:700;margin-bottom:8px;">Ajustes de acceso</div>
       <button class="btn btn-ghost btn-sm btn-block" onclick="openChangePasscode()">Cambiar contraseña de administrador</button>
+      <button class="btn btn-ghost btn-sm btn-block" style="margin-top:8px;" onclick="activarNotificaciones('admin','admin')">🔔 Activar notificaciones</button>
       <button class="btn btn-ghost btn-sm btn-block" style="margin-top:8px;color:var(--danger);border-color:var(--danger);" onclick="logout()">Cerrar sesión</button>
     </div>
 
@@ -1157,19 +1198,36 @@ function renderDomiciliacionAdmin(){
     if(status.startsWith('pago_rejected') || status.startsWith('pago_cancelled')) return {text:'Último cobro falló', cls:'status-moroso'};
     return {text:status, cls:'status-pausado'};
   };
-  area.innerHTML = activeStudents().length===0 ? emptyBlock('Sin alumnos','Agrega alumnos primero') :
+  const currentBillingDay = state.settings.billingDay || 5;
+  area.innerHTML = `
+    <div class="card">
+      <div class="s-name" style="margin-bottom:4px;">Día de cobro mensual</div>
+      <div class="s-meta" style="margin-bottom:10px;">Se aplica a las domiciliaciones nuevas que se creen a partir de ahora. Las que ya están activas conservan la fecha con la que se autorizaron.</div>
+      <select id="billingDaySelect" onchange="setBillingDay(this.value)">
+        <option value="5" ${currentBillingDay==5?'selected':''}>Día 5 de cada mes</option>
+        <option value="15" ${currentBillingDay==15?'selected':''}>Día 15 de cada mes</option>
+      </select>
+    </div>
+    ${activeStudents().length===0 ? emptyBlock('Sin alumnos','Agrega alumnos primero') :
     activeStudents().map(s=>{
       const sub = byStudent[s.id];
       const st = statusLabel(sub ? sub.status : null);
+      const nextPay = sub && sub.next_payment_date ? new Date(sub.next_payment_date).toLocaleDateString('es-MX',{day:'numeric',month:'short'}) : null;
       return `<div class="card"><div class="student-row">
         <div class="avatar">${s.photo?`<img src="${s.photo}">`:initials(s.name)}</div>
         <div style="flex:1;">
           <div class="s-name">${s.name}</div>
-          <div class="s-meta">${s.email || 'Sin correo registrado'}${s.membershipFee?' · $'+s.membershipFee+'/mes':''}</div>
+          <div class="s-meta">${s.email || 'Sin correo registrado'}${s.membershipFee?' · $'+s.membershipFee+'/mes':''}${nextPay?' · Próximo cobro: '+nextPay:''}</div>
         </div>
         <span class="status-pill ${st.cls}">${st.text}</span>
       </div></div>`;
-    }).join('');
+    }).join('')}
+  `;
+}
+async function setBillingDay(val){
+  state.settings.billingDay = Number(val);
+  await saveKey('settings', state.settings);
+  showToast('Día de cobro actualizado');
 }
 function renderCobros(){
   const area=document.getElementById('pagosArea');
@@ -1524,6 +1582,7 @@ async function savePost(){
   const result = await saveListSafely('posts', arr=>arr.push({id:uid(), type, title, body, photo, date:todayLocalStr(), reactions:{likes:[],asistire:[]}}));
   if(!result) return;
   closeModal(); render(); showToast('Publicado en el muro');
+  enviarNotificacion('student', null, 'muro', 'Nuevo en el muro 📣', title, '/');
 }
 async function deletePost(id){
   await saveListSafely('posts', arr=>{ const idx=arr.findIndex(p=>p.id===id); if(idx>=0) arr.splice(idx,1); });
@@ -1670,6 +1729,11 @@ function renderPerfilAlumno(c){
     <div class="card">
       <div class="s-name" style="margin-bottom:4px;">Domiciliación automática</div>
       ${renderDomiciliacionEstado(s)}
+    </div>
+    <div class="card">
+      <div class="s-name" style="margin-bottom:4px;">Notificaciones</div>
+      <div class="s-meta" style="margin-bottom:10px;">Recibe un aviso cuando alguien te rete, publique en el muro, o cambie tu domiciliación. En iPhone/iPad, primero agrega la app a tu pantalla de inicio.</div>
+      <button class="btn btn-ghost btn-block" onclick="activarNotificaciones('student','${s.id}')">🔔 Activar notificaciones</button>
     </div>
     ${titleList.length?`<div class="card">${titleList.map(t=>`<div class="att-history-item"><span>🏅 ${t}</span></div>`).join('')}</div>`:''}
     ${retosBadgesFor(s.id).length?`<div class="card">${retosBadgesFor(s.id).map(b=>`<div class="att-history-item"><span>${b}</span></div>`).join('')}</div>`:''}
@@ -2041,6 +2105,9 @@ async function crearReto(){
   const { error } = await sb.from('retos').insert(row);
   if(error){ showToast('No se pudo crear el reto: '+error.message, true); return; }
   closeModal(); await loadRetos(); render(); showToast('Reto enviado');
+  if(opponentId){
+    enviarNotificacion('student', opponentId, 'reto', '¡Te retaron! 🥋', state.currentProfile.name+' te retó para '+slotLabel(timeSlot), '/');
+  }
 }
 async function tomarRetoAbierto(id){
   const { error } = await sb.from('retos').update({opponent_id: state.currentProfile.id, status:'aceptado'}).eq('id', id);
