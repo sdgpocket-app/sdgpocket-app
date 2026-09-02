@@ -1812,6 +1812,7 @@ function openMyEditForm(){
       <button class="btn btn-ghost btn-sm" onclick="document.getElementById('myPhotoInput').click()">Cambiar foto</button></div>
     </div>
     <div class="field"><label>Apodo (opcional)</label><input id="my_nickname" value="${s.nickname||''}" placeholder="Ej. El Tigre"></div>
+    <div class="field"><label>¿Desde cuándo entrenas en la academia?</label><input type="date" id="my_join" value="${s.joinDate||''}" max="${todayLocalStr()}"></div>
     <div class="field"><label>Teléfono</label><input id="my_phone" value="${s.phone||''}"></div>
     <div class="field"><label>Correo (necesario para domiciliar tu pago)</label><input id="my_email" type="email" value="${s.email||''}" placeholder="tucorreo@correo.com"></div>
     <div class="field"><label>Instagram (opcional)</label><input id="my_instagram" placeholder="@tuusuario" value="${s.instagram||''}"></div>
@@ -1843,6 +1844,7 @@ function handleMyPhoto(input){
 }
 async function saveMyProfile(){
   const nickname = document.getElementById('my_nickname').value.trim();
+  const joinDateInput = document.getElementById('my_join').value;
   const phone = document.getElementById('my_phone').value.trim();
   const email = document.getElementById('my_email').value.trim();
   const instagram = document.getElementById('my_instagram').value.trim().replace(/^@/,'');
@@ -1850,9 +1852,13 @@ async function saveMyProfile(){
   const titles = document.getElementById('my_titles').value.trim();
   const photo = window._myPhoto;
   const myId = state.currentProfile.id;
+  if(joinDateInput && joinDateInput > todayLocalStr()){
+    showToast('La fecha de inicio no puede ser en el futuro', true); return;
+  }
   const fresh = await saveListSafely('students', arr=>{
     const idx = arr.findIndex(x=>x.id===myId); if(idx<0) return;
     arr[idx].nickname = nickname; arr[idx].phone = phone; arr[idx].email = email; arr[idx].instagram = instagram; arr[idx].weight = weight; arr[idx].titles = titles;
+    if(joinDateInput) arr[idx].joinDate = joinDateInput;
     arr[idx].photo = photo || arr[idx].photo;
   });
   if(!fresh) return;
