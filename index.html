@@ -420,8 +420,24 @@ function tableFor(key){ return SHARED_KEYS.has(key) ? 'kv_shared' : 'kv_private'
    Esto evita que una pantalla desactualizada sobrescriba y borre datos guardados por
    otro dispositivo o en otro momento. Devuelve null si el guardado falló, para que
    quien llama a esta función NUNCA muestre "éxito" si en realidad no se guardó nada. */
+/* A diferencia de safeGet (que regresa [] si falla, pensado solo para mostrar en pantalla),
+   esta versión NUNCA regresa [] en caso de error — dejar que el error se propague es
+   intencional: preferimos cancelar un guardado a arriesgarnos a sobrescribir datos reales
+   con una lista vacía por una falla de red momentánea. */
+async function safeGetStrict(key){
+  const { data, error } = await sb.from(tableFor(key)).select('value').eq('key', key).maybeSingle();
+  if(error) throw error;
+  return data ? data.value : [];
+}
 async function saveListSafely(key, mutateFn){
-  const fresh = (await safeGet(key)) || [];
+  let fresh;
+  try{
+    fresh = await safeGetStrict(key);
+  }catch(e){
+    console.error('No se pudo leer '+key+' antes de guardar — se cancela el guardado para no perder datos', e);
+    showToast('No se pudo guardar (falló la conexión). Intenta de nuevo.', true);
+    return null;
+  }
   mutateFn(fresh);
   const ok = await saveKey(key, fresh);
   if(!ok) return null;
@@ -571,10 +587,12 @@ function renderGate(c){
   }
   if(state.auth==='studentPin'){
     const isNew = !!state.pendingProfile._isNew;
+    const needsReset = !!state.pendingProfile._needsPinReset;
     c.innerHTML = `
       <div class="gate">
         <button class="back-link" onclick="state.auth = isNewGoBack(); render()">← Volver</button>
-        <div class="gate-title"><div class="kicker">${state.pendingProfile.name}</div><h2 style="font-size:20px;">${isNew?'Crea tu PIN de 4 dígitos':'Escribe tu PIN'}</h2></div>
+        <div class="gate-title"><div class="kicker">${state.pendingProfile.name}</div><h2 style="font-size:20px;">${(isNew||needsReset)?'Crea tu PIN de 4 dígitos':'Escribe tu PIN'}</h2></div>
+        ${needsReset?'<div class="s-meta" style="margin-bottom:10px;">Tu perfil se restableció — crea un PIN nuevo y tu historial va a seguir aquí.</div>':''}
         <div class="pin-dots">${renderPinDots(4)}</div>
         ${renderKeypad('checkStudentPin')}
       </div>`;
@@ -603,7 +621,7 @@ function renderPickList(q){
 }
 function pickProfile(id){
   const s = state.students.find(x=>x.id===id);
-  state.pendingProfile = Object.assign({}, s, {_isNew:false});
+  state.pendingProfile = Object.assign({}, s, {_isNew:false, _needsPinReset: !!s._needsPinReset});
   state.pinBuffer='';
   state.auth='studentPin';
   render();
@@ -695,6 +713,18 @@ async function checkStudentPin(){
     state.auth='student'; state.tab='perfil'; state.pinBuffer='';
     render();
     showToast('¡Bienvenido, '+p.name+'!');
+    await loadMiSuscripcion(); render();
+  } else if(p._needsPinReset){
+    const newHash = await hashPin(state.pinBuffer);
+    const fresh = await saveListSafely('students', arr=>{
+      const idx = arr.findIndex(x=>x.id===p.id); if(idx<0) return;
+      arr[idx].pinHash = newHash; delete arr[idx]._needsPinReset;
+    });
+    if(!fresh) return;
+    state.currentProfile = fresh.find(x=>x.id===p.id);
+    state.auth='student'; state.tab='perfil'; state.pinBuffer='';
+    render();
+    showToast('¡Listo! Tu historial sigue aquí, '+p.name);
     await loadMiSuscripcion(); render();
   } else {
     const h = await hashPin(state.pinBuffer);
@@ -1064,6 +1094,7 @@ function renderAlumnos(c){
       : `<div style="text-align:right;margin:-8px 0 10px;"><button class="back-link" onclick="state.showArchived=true; render()" style="margin:0;">🗑 Papelera (${archivedCount})</button></div>`
     }
     <input class="search-box" placeholder="Buscar alumno…" value="${studentSearch}" oninput="studentSearch=this.value; renderAlumnos(document.getElementById('content'))">
+    ${!showArchived?`<button class="btn btn-ghost btn-sm btn-block" style="margin-bottom:12px;border-color:var(--danger);color:var(--danger);" onclick="openRecuperarAlumno()">🩹 Recuperar alumno perdido (reconecta su historial)</button>`:''}
     ${list.length===0?emptyBlock(showArchived?'Papelera vacía':'Sin alumnos todavía', showArchived?'Los alumnos que archives aparecerán aquí':'Toca + para agregar, o pídeles que se registren ellos mismos'):list.map(s=>{
       const st=computeLiveStatus(s);
       return `<div class="card" style="cursor:pointer;" onclick="openStudentDetail('${s.id}')">
@@ -1074,6 +1105,42 @@ function renderAlumnos(c){
         </div></div>`;
     }).join('')}
   `;
+}
+/* Herramienta temporal de emergencia: recrea un alumno usando un ID específico (el que
+   tenía antes de perderse), para que su asistencia/retos/pagos viejos —que siguen guardados
+   en otras tablas bajo ese mismo ID— se reconecten automáticamente con su perfil nuevo. */
+function openRecuperarAlumno(){
+  const modal=document.createElement('div'); modal.className='overlay';
+  modal.innerHTML=`<div class="sheet">
+    <div class="sheet-head"><h3>Recuperar alumno perdido</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="s-meta" style="margin-bottom:14px;">Usa el ID exacto que tenía antes (lo ves en las tablas de asistencia, retos o pagos en Supabase) para que su historial se reconecte solo.</div>
+    <div class="field"><label>ID exacto (de la tabla vieja)</label><input id="rec_id" placeholder="ej. mtj4r401h05yy"></div>
+    <div class="field"><label>Nombre completo</label><input id="rec_name" placeholder="Nombre del alumno"></div>
+    <div class="field"><label>Cinturón</label><select id="rec_belt">
+      <option>Blanco</option><option>Azul</option><option>Púrpura</option><option>Marrón</option><option>Negro</option>
+    </select></div>
+    <button class="btn btn-primary btn-block" onclick="guardarRecuperarAlumno()">Recuperar con este ID</button>
+  </div>`;
+  document.body.appendChild(modal);
+}
+async function guardarRecuperarAlumno(){
+  const id = document.getElementById('rec_id').value.trim();
+  const name = document.getElementById('rec_name').value.trim();
+  const belt = document.getElementById('rec_belt').value;
+  if(!id || !name){ showToast('Escribe el ID y el nombre', true); return; }
+  const existing = state.students.find(x=>x.id===id);
+  if(existing){ showToast('Ya existe un alumno con ese ID: '+existing.name, true); return; }
+  const result = await saveListSafely('students', arr=>{
+    arr.push({
+      id, name, belt, phone:'', email:'', instagram:'', nickname:'',
+      joinDate: todayLocalStr(), photo:'', role:'student', birthDate:'',
+      weight:'', titles:'', membershipType:'regular', membershipNote:'', membershipFee:'',
+      pinHash: null, _needsPinReset:true,
+    });
+  });
+  if(!result) return;
+  closeModal(); render();
+  showToast(name+' recuperado — pídele que entre y cree su PIN de nuevo');
 }
 function openStudentForm(existing){
   const s = existing || {id:uid(), name:'', phone:'', email:'', instagram:'', belt:'Blanco', joinDate:todayLocalStr(), photo:'', role:'student', birthDate:'', weight:'', titles:'', membershipType:'regular', membershipNote:'', membershipFee:''};
