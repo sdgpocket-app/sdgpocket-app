@@ -1094,7 +1094,6 @@ function renderAlumnos(c){
       : `<div style="text-align:right;margin:-8px 0 10px;"><button class="back-link" onclick="state.showArchived=true; render()" style="margin:0;">🗑 Papelera (${archivedCount})</button></div>`
     }
     <input class="search-box" placeholder="Buscar alumno…" value="${studentSearch}" oninput="studentSearch=this.value; renderAlumnos(document.getElementById('content'))">
-    ${!showArchived?`<button class="btn btn-ghost btn-sm btn-block" style="margin-bottom:12px;border-color:var(--danger);color:var(--danger);" onclick="openRecuperarAlumno()">🩹 Recuperar alumno perdido (reconecta su historial)</button>`:''}
     ${list.length===0?emptyBlock(showArchived?'Papelera vacía':'Sin alumnos todavía', showArchived?'Los alumnos que archives aparecerán aquí':'Toca + para agregar, o pídeles que se registren ellos mismos'):list.map(s=>{
       const st=computeLiveStatus(s);
       return `<div class="card" style="cursor:pointer;" onclick="openStudentDetail('${s.id}')">
