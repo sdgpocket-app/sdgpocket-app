@@ -721,7 +721,9 @@ async function checkStudentPin(){
       arr[idx].pinHash = newHash; delete arr[idx]._needsPinReset;
     });
     if(!fresh) return;
-    state.currentProfile = fresh.find(x=>x.id===p.id);
+    const me = fresh.find(x=>x.id===p.id);
+    if(!me){ showToast('No se encontró tu perfil, vuelve a intentarlo o avísale al admin', true); state.pinBuffer=''; render(); return; }
+    state.currentProfile = me;
     state.auth='student'; state.tab='perfil'; state.pinBuffer='';
     render();
     showToast('¡Listo! Tu historial sigue aquí, '+p.name);
@@ -729,7 +731,9 @@ async function checkStudentPin(){
   } else {
     const h = await hashPin(state.pinBuffer);
     if(h === p.pinHash){
-      state.currentProfile = state.students.find(x=>x.id===p.id);
+      const me = state.students.find(x=>x.id===p.id);
+      if(!me){ showToast('No se encontró tu perfil, vuelve a intentarlo o avísale al admin', true); state.pinBuffer=''; render(); return; }
+      state.currentProfile = me;
       state.auth='student'; state.tab='perfil'; state.pinBuffer='';
       render();
       await loadMiSuscripcion(); render();
@@ -1826,6 +1830,7 @@ async function submitComprobante(){
   });
   if(error){ showToast('No se pudo enviar: '+error.message, true); if(btn){ btn.disabled=false; btn.textContent='Enviar'; } return; }
   closeModal(); showToast('Comprobante enviado. El admin lo va a revisar pronto.');
+  enviarNotificacion('admin', 'admin', 'comprobante', 'Nuevo comprobante 📷', state.currentProfile.name+' subió un comprobante de pago para revisar', '/');
 }
 function renderPerfilAlumno(c){
   const s = state.students.find(x=>x.id===state.currentProfile.id) || state.currentProfile;
