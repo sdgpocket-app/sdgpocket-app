@@ -243,7 +243,7 @@
 let state = {
   auth: 'chooser', // chooser | adminLogin | studentPick | studentRegister | studentPin | admin | student
   tab: 'inicio',
-  students: [], payments: [], attendance: [], leads: [], posts: [], comments: [], settings: {}, expenses: [], comprobantes: [], retos: [], retosView: 'ranking', suscripciones: [],
+  students: [], payments: [], attendance: [], leads: [], posts: [], comments: [], settings: {}, expenses: [], comprobantes: [], retos: [], retosView: 'ranking', suscripciones: [], asistenciaPendiente: [],
   loaded: false,
   monthCursor: new Date(),
   scanMode: false, scanStream: null, attendanceClass: null, miSuscripcion: null,
@@ -387,7 +387,15 @@ async function reloadPrivateData(){
     state.payments=p||[]; state.leads=l||[]; state.settings=se||{}; state.expenses=ex||[];
     await loadComprobantes();
     await loadSuscripciones();
+    await loadAsistenciaPendiente();
   }catch(e){ console.error(e); showToast('No se pudieron cargar los datos privados', true); }
+}
+async function loadAsistenciaPendiente(){
+  try{
+    const { data, error } = await sb.from('asistencia_pendiente').select('*').order('created_at', {ascending:false});
+    if(error) throw error;
+    state.asistenciaPendiente = data || [];
+  }catch(e){ console.error(e); state.asistenciaPendiente = state.asistenciaPendiente || []; }
 }
 async function loadSuscripciones(){
   try{
@@ -1520,6 +1528,7 @@ function renderAsistencia(c){
   if(!state.attendanceClass || !todayClasses.includes(state.attendanceClass)){
     state.attendanceClass = todayClasses[0] || null;
   }
+  const pendCount = (state.asistenciaPendiente||[]).filter(x=>x.status==='pendiente').length;
   c.innerHTML=`
     <div class="section-head"><h2>Asistencia</h2></div><div class="section-underline"></div>
     ${todayClasses.length===0 ? `<div class="s-meta" style="margin-bottom:12px;">Hoy (${todayDayName()}) no hay clases programadas en el horario.</div>` : `
@@ -1528,12 +1537,23 @@ function renderAsistencia(c){
         ${todayClasses.map(t=>`<option value="${t}" ${state.attendanceClass===t?'selected':''}>${t}</option>`).join('')}
       </select>
     </div>`}
-    <div class="tabs-scan-toggle"><button class="${!state.scanMode?'active':''}" onclick="switchScan(false)">Manual</button><button class="${state.scanMode?'active':''}" onclick="switchScan(true)">Escanear QR</button></div>
+    <div class="tabs-scan-toggle">
+      <button class="${state.asistenciaView!=='qr' && state.asistenciaView!=='pendientes'?'active':''}" onclick="setAsistenciaView('manual')">Manual</button>
+      <button class="${state.asistenciaView==='qr'?'active':''}" onclick="setAsistenciaView('qr')">Escanear QR</button>
+      <button class="${state.asistenciaView==='pendientes'?'active':''}" onclick="setAsistenciaView('pendientes')">Pendientes${pendCount>0?' ('+pendCount+')':''}</button>
+    </div>
     <div id="attArea"></div>`;
-  if(state.scanMode) renderScanArea(); else renderManualAttendance();
+  if(state.asistenciaView==='qr') renderScanArea();
+  else if(state.asistenciaView==='pendientes') renderAsistenciaPendientesAdmin();
+  else renderManualAttendance();
+}
+function setAsistenciaView(v){
+  state.asistenciaView = v;
+  state.scanMode = (v==='qr');
+  if(v!=='qr') stopScan();
+  render();
 }
 function setAttendanceClass(val){ state.attendanceClass = val; render(); }
-function switchScan(mode){ stopScan(); state.scanMode=mode; render(); }
 const MAX_SESSIONS_PER_DAY = 3;
 function renderManualAttendance(){
   const area=document.getElementById('attArea');
@@ -1554,6 +1574,53 @@ function renderManualAttendance(){
       <button class="btn btn-sm ${alreadyThisClass?'btn-primary':'btn-ghost'}" ${(alreadyThisClass||full)?'disabled':''} onclick="markAttendance('${s.id}')">${alreadyThisClass?'✓ Ya en esta clase':(full?'Máximo del día':'Marcar')}</button>
     </div></div>`;
   }).join('');
+}
+function renderAsistenciaPendientesAdmin(){
+  const area=document.getElementById('attArea');
+  const list = (state.asistenciaPendiente||[]).slice().sort((a,b)=>{
+    if(a.status==='pendiente' && b.status!=='pendiente') return -1;
+    if(a.status!=='pendiente' && b.status==='pendiente') return 1;
+    return (b.created_at||'').localeCompare(a.created_at||'');
+  });
+  if(list.length===0){ area.innerHTML = emptyBlock('Sin solicitudes','Cuando un alumno reporte una asistencia olvidada, aparecerá aquí'); return; }
+  area.innerHTML = list.map(ap=>{
+    const s = state.students.find(x=>x.id===ap.student_id);
+    const name = s ? s.name : 'Alumno no encontrado';
+    const statusPill = ap.status==='pendiente' ? '<span class="status-pill status-pendiente">Pendiente</span>'
+      : ap.status==='aprobada' ? '<span class="status-pill status-pagado">Aprobada</span>'
+      : '<span class="status-pill status-moroso">Rechazada</span>';
+    return `<div class="card">
+      <div class="student-row" style="margin-bottom:8px;">
+        <div class="avatar">${s&&s.photo?`<img src="${s.photo}">`:initials(name)}</div>
+        <div style="flex:1;"><div class="s-name">${name}</div><div class="s-meta">${fmtDate(ap.date)} · ${ap.class_name}</div></div>
+        ${statusPill}
+      </div>
+      ${ap.status==='pendiente' ? `
+      <div style="display:flex;gap:6px;">
+        <button class="btn btn-sm btn-primary" style="flex:1;" onclick="aprobarAsistenciaPendiente('${ap.id}','${ap.student_id}','${ap.date}','${ap.class_name}')">Aprobar</button>
+        <button class="btn btn-sm btn-ghost" style="flex:1;color:var(--danger);border-color:var(--danger);" onclick="rechazarAsistenciaPendiente('${ap.id}','${ap.student_id}')">Rechazar</button>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+async function aprobarAsistenciaPendiente(id, studentId, date, className){
+  const yaExiste = state.attendance.some(a=>a.studentId===studentId && a.date===date && a.className===className);
+  if(!yaExiste){
+    const result = await saveListSafely('attendance', arr=>arr.push({id:uid(), studentId, date, className}));
+    if(!result) return;
+  }
+  const { error } = await sb.from('asistencia_pendiente').update({status:'aprobada'}).eq('id', id);
+  if(error){ showToast('Asistencia agregada, pero no se pudo actualizar la solicitud: '+error.message, true); }
+  await loadAsistenciaPendiente(); render(); showToast('Asistencia aprobada');
+  enviarNotificacion('student', studentId, 'asistencia', 'Asistencia aprobada ✅', 'Tu clase de '+className+' del '+fmtDate(date)+' ya cuenta', '/');
+}
+async function rechazarAsistenciaPendiente(id, studentId){
+  const note = prompt('¿Por qué se rechaza? (opcional)','');
+  if(note===null) return;
+  const { error } = await sb.from('asistencia_pendiente').update({status:'rechazada', note}).eq('id', id);
+  if(error){ showToast('No se pudo rechazar: '+error.message, true); return; }
+  await loadAsistenciaPendiente(); render(); showToast('Solicitud rechazada');
+  enviarNotificacion('student', studentId, 'asistencia', 'Asistencia no aprobada', 'Tu solicitud de asistencia fue rechazada'+(note?': '+note:''), '/');
 }
 async function markAttendance(studentId){
   if(!state.attendanceClass){ showToast('Selecciona la clase de hoy primero', true); return; }
@@ -1781,6 +1848,49 @@ async function domiciliarPago(){
   render();
   if(data && data.init_point){ window.open(data.init_point, '_blank'); }
 }
+function openReportarAsistencia(){
+  const today = new Date();
+  const yesterday = new Date(today); yesterday.setDate(today.getDate()-1);
+  const opciones = [
+    {label:'Hoy · '+DAY_NAMES[today.getDay()], date: todayLocalStr(today), day: DAY_NAMES[today.getDay()]},
+    {label:'Ayer · '+DAY_NAMES[yesterday.getDay()], date: todayLocalStr(yesterday), day: DAY_NAMES[yesterday.getDay()]},
+  ];
+  window._asistDias = opciones;
+  const modal=document.createElement('div'); modal.className='overlay';
+  modal.innerHTML=`<div class="sheet">
+    <div class="sheet-head"><h3>Reportar asistencia</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="field"><label>¿Qué día fue la clase?</label>
+      <select id="asist_dia" onchange="updateAsistClases()">
+        ${opciones.map((o,i)=>`<option value="${i}">${o.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field"><label>¿Qué clase?</label>
+      <select id="asist_clase"></select>
+    </div>
+    <button class="btn btn-primary btn-block" onclick="submitAsistenciaPendiente()">Enviar para revisión</button>
+  </div>`;
+  document.body.appendChild(modal);
+  updateAsistClases();
+}
+function updateAsistClases(){
+  const idx = Number(document.getElementById('asist_dia').value);
+  const opcion = window._asistDias[idx];
+  const clases = SCHEDULE_BY_DAY[opcion.day] || [];
+  const sel = document.getElementById('asist_clase');
+  sel.innerHTML = clases.length ? clases.map(t=>`<option value="${t}">${t}</option>`).join('') : '<option value="">Sin clases ese día</option>';
+}
+async function submitAsistenciaPendiente(){
+  const idx = Number(document.getElementById('asist_dia').value);
+  const opcion = window._asistDias[idx];
+  const claseSeleccionada = document.getElementById('asist_clase').value;
+  if(!claseSeleccionada){ showToast('Ese día no hay clases programadas', true); return; }
+  const { error } = await sb.from('asistencia_pendiente').insert({
+    student_id: state.currentProfile.id, date: opcion.date, class_name: claseSeleccionada, status: 'pendiente'
+  });
+  if(error){ showToast('No se pudo enviar: '+error.message, true); return; }
+  closeModal(); showToast('Enviado. El admin lo va a revisar pronto.');
+  enviarNotificacion('admin', 'admin', 'asistencia', 'Asistencia por revisar 🥋', state.currentProfile.name+' reportó una clase olvidada', '/');
+}
 function openComprobanteModal(){
   const d = new Date();
   const opts=[];
@@ -1866,6 +1976,11 @@ function renderPerfilAlumno(c){
       <div class="s-name" style="margin-bottom:4px;">Mi mensualidad</div>
       <div class="s-meta" style="margin-bottom:10px;">¿Ya pagaste? Sube tu comprobante y el admin lo revisará y aprobará.</div>
       <button class="btn btn-primary btn-block" onclick="openComprobanteModal()">Subir comprobante de pago</button>
+    </div>
+    <div class="card">
+      <div class="s-name" style="margin-bottom:4px;">¿Se te olvidó registrar tu asistencia?</div>
+      <div class="s-meta" style="margin-bottom:10px;">Puedes reportarla hasta el día siguiente de la clase. El admin la revisa antes de que cuente.</div>
+      <button class="btn btn-ghost btn-block" onclick="openReportarAsistencia()">Reportar asistencia olvidada</button>
     </div>
     <div class="card">
       <div class="s-name" style="margin-bottom:4px;">Domiciliación automática</div>
