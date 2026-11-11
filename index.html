@@ -2400,14 +2400,18 @@ async function deletePostComment(postId, cid){
 }
 async function toggleReaction(postId, kind){
   const myId = state.currentProfile.id;
-  await saveListSafely('posts', arr=>{
+  let added=false, postTitle='';
+  const result = await saveListSafely('posts', arr=>{
     const p = arr.find(x=>x.id===postId); if(!p) return;
+    postTitle = p.title;
     if(!p.reactions) p.reactions={likes:[],asistire:[]};
     if(!p.reactions[kind]) p.reactions[kind]=[];
     const idx = p.reactions[kind].indexOf(myId);
-    if(idx>=0) p.reactions[kind].splice(idx,1); else p.reactions[kind].push(myId);
+    if(idx>=0) p.reactions[kind].splice(idx,1); else { p.reactions[kind].push(myId); added=true; }
   });
   render();
+  if(result && added && kind==='asistire') enviarNotificacion('admin','admin','muro','Nuevo asistente ✅', state.currentProfile.name+' asistirá a: '+postTitle, '/');
+  else if(result && added) enviarNotificacion('admin','admin','muro','Nuevo me gusta 👍', state.currentProfile.name+' reaccionó a: '+postTitle, '/');
 }
 
 /* ============ BUZÓN ALUMNO ============ */
@@ -2736,6 +2740,7 @@ async function sendComment(){
   const authorId=state.currentProfile.id, authorName=state.currentProfile.name;
   await saveListSafely('comments', arr=>arr.push({id:uid(), authorId, authorName, category, topic, message:msg, date:todayLocalStr()}));
   render(); showToast('Comentario enviado');
+  enviarNotificacion('admin','admin','buzon','Nuevo comentario en el buzón ✉️', authorName+': '+msg.slice(0,80), '/');
 }
 function openBuzonQuickCompose(){
   const modal=document.createElement('div'); modal.className='overlay';
@@ -2762,6 +2767,7 @@ async function sendQuickComment(){
   const authorId=state.currentProfile.id, authorName=state.currentProfile.name;
   await saveListSafely('comments', arr=>arr.push({id:uid(), authorId, authorName, category, topic, message:msg, date:todayLocalStr()}));
   closeModal(); showToast('Comentario enviado');
+  enviarNotificacion('admin','admin','buzon','Nuevo comentario en el buzón ✉️', authorName+': '+msg.slice(0,80), '/');
   if(state.tab==='buzon') render();
 }
 
