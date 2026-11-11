@@ -214,6 +214,7 @@
   .post-type{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--petrol);}
   .reaction-row{display:flex;gap:14px;margin-top:10px;}
   .reaction-count{font-size:12px;color:var(--muted);font-weight:600;}
+.scroll-list{max-height:260px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
 </style>
 </head>
 <body>
@@ -278,6 +279,38 @@ function urlBase64ToUint8Array(base64String){
   const rawData = atob(base64);
   return Uint8Array.from([...rawData].map(c=>c.charCodeAt(0)));
 }
+async function registrarSuscripcionPush(ownerType, ownerId){
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if(!sub){
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+  }
+  const j = sub.toJSON();
+  const flagKey = 'sdg_push_reg', flagVal = j.endpoint+'|'+ownerType+':'+ownerId;
+  try{ if(localStorage.getItem(flagKey)===flagVal) return; }catch(e){}
+  const { data: ex } = await sb.from('push_subscriptions').select('id,owner_type,owner_id').eq('endpoint', j.endpoint).maybeSingle();
+  if(ex){
+    if(ex.owner_type!==ownerType || ex.owner_id!==ownerId){
+      const { error } = await sb.from('push_subscriptions').update({ owner_type: ownerType, owner_id: ownerId, p256dh: j.keys.p256dh, auth_key: j.keys.auth }).eq('id', ex.id);
+      if(error) throw error;
+    }
+    try{ localStorage.setItem(flagKey, flagVal); }catch(e){}
+    return;
+  }
+  const { error } = await sb.from('push_subscriptions').insert({ owner_type: ownerType, owner_id: ownerId, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth_key: j.keys.auth });
+  if(error && !/duplicate|unique/i.test(error.message||'')) throw error;
+  try{ localStorage.setItem(flagKey, flagVal); }catch(e){}
+}
+/* Cada vez que se abre la app con sesión iniciada, si el permiso ya fue concedido,
+   revisamos en silencio que la suscripción siga vigente y registrada. Así no se "desactivan". */
+async function resyncNotificaciones(){
+  try{
+    if(!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+    if(Notification.permission!=='granted') return;
+    if(state.auth==='admin') await registrarSuscripcionPush('admin','admin');
+    else if(state.auth==='student' && state.currentProfile) await registrarSuscripcionPush('student', state.currentProfile.id);
+  }catch(e){ console.error('Resync de notificaciones falló', e); }
+}
 async function activarNotificaciones(ownerType, ownerId){
   if(!('serviceWorker' in navigator) || !('PushManager' in window)){
     showToast('Tu navegador no soporta notificaciones push. En iPhone/iPad, agrega la app a tu pantalla de inicio primero.', true);
@@ -286,22 +319,9 @@ async function activarNotificaciones(ownerType, ownerId){
   try{
     const permission = await Notification.requestPermission();
     if(permission!=='granted'){ showToast('No diste permiso para recibir notificaciones', true); return; }
-    const reg = await navigator.serviceWorker.ready;
-    let sub = await reg.pushManager.getSubscription();
-    if(!sub){
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
-      });
-    }
-    const subJson = sub.toJSON();
-    const { error } = await sb.from('push_subscriptions').insert({
-      owner_type: ownerType, owner_id: ownerId,
-      endpoint: subJson.endpoint, p256dh: subJson.keys.p256dh, auth_key: subJson.keys.auth
-    });
-    if(error){ showToast('No se pudo activar: '+error.message, true); return; }
+    await registrarSuscripcionPush(ownerType, ownerId);
     showToast('🔔 ¡Notificaciones activadas!');
-  }catch(e){ console.error(e); showToast('No se pudieron activar las notificaciones', true); }
+  }catch(e){ console.error(e); showToast('No se pudieron activar: '+(e.message||'error'), true); }
 }
 async function enviarNotificacion(targetType, targetId, tipo, title, body, url){
   try{
@@ -366,6 +386,7 @@ async function loadAll(){
       safeGet('students'), safeGet('payments'), safeGet('attendance'), safeGet('leads'),
       safeGet('posts'), safeGet('comments'), safeGetObj('settings'), safeGet('expenses')
     ]);
+    state.incomes = state.incomes || [];
     state.students=s||[]; state.payments=p||[]; state.attendance=a||[]; state.leads=l||[];
     state.posts=po||[]; state.comments=co||[]; state.settings = se || {}; state.expenses = ex||[];
     _lastStudentsFetch = Date.now();
@@ -381,10 +402,10 @@ async function loadAll(){
 }
 async function reloadPrivateData(){
   try{
-    const [p,l,se,ex] = await Promise.all([
-      safeGet('payments'), safeGet('leads'), safeGetObj('settings'), safeGet('expenses')
+    const [p,l,se,ex,inc] = await Promise.all([
+      safeGet('payments'), safeGet('leads'), safeGetObj('settings'), safeGet('expenses'), safeGet('incomes')
     ]);
-    state.payments=p||[]; state.leads=l||[]; state.settings=se||{}; state.expenses=ex||[];
+    state.payments=p||[]; state.leads=l||[]; state.settings=se||{}; state.expenses=ex||[]; state.incomes=inc||[];
     await loadComprobantes();
     await loadSuscripciones();
     await loadAsistenciaPendiente();
@@ -509,6 +530,7 @@ function render(){
   }
   document.getElementById('gateBg').style.display='none';
 
+  { const k = state.auth+':'+(state.currentProfile?state.currentProfile.id:''); if(state._pushKey!==k){ state._pushKey=k; resyncNotificaciones(); } }
   topbar.classList.add('compact');
   logoutBtn.style.display='inline';
   refreshBtn.style.display='inline';
@@ -854,46 +876,85 @@ function attendanceByDayThisMonth(studentId){
   }
   return { labels, data };
 }
-function computeStreak(studentId, restDay){
-  const mine = new Set(state.attendance.filter(a=>a.studentId===studentId).map(a=>a.date));
-  let streak=0, cursor=new Date(); cursor.setHours(0,0,0,0);
-  let first=true, guard=0;
-  while(guard++<730){
-    const key=todayLocalStr(cursor);
-    const dow=cursor.getDay();
-    const attended=mine.has(key);
-    if(first && !attended){ first=false; cursor.setDate(cursor.getDate()-1); continue; }
-    first=false;
-    if(attended || dow===restDay){ streak++; cursor.setDate(cursor.getDate()-1); }
-    else break;
-  }
-  return streak;
+/* ===== Meta semanal y racha =====
+   Cada semana (lunes a domingo) el alumno dice cuántos días se propone ir (2 a 7).
+   Descansos permitidos esa semana = 7 − meta. Quien se propone 5+ días lleva la RACHA
+   PRINCIPAL (en días, los descansos la mantienen). Quien se propone 4 o menos lleva una
+   racha de CONSTANCIA en semanas cumplidas. El alumno no ve que existen estos dos grupos. */
+const GOAL_MIN = 2, GOAL_MAX = 7, MAIN_GOAL_MIN = 5;
+function mondayOf(d){ const x=new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDate()-((x.getDay()+6)%7)); return x; }
+function goalForWeek(st, weekKey){
+  const g=(st&&st.weekGoals)||{}; let best=null;
+  Object.keys(g).sort().forEach(k=>{ if(k<=weekKey) best=g[k]; });
+  return best;
 }
-function currentWeekStatus(studentId, restDay){
-  const mineDates = state.attendance.filter(a=>a.studentId===studentId).map(a=>a.date);
-  const counts = {};
-  mineDates.forEach(d=>{ counts[d]=(counts[d]||0)+1; });
+function tierOf(goal){ return goal==null ? null : (goal>=MAIN_GOAL_MIN ? 'principal' : 'constancia'); }
+function tierLabel(goal){ return goal==null ? 'Sin meta' : goal>=MAIN_GOAL_MIN ? 'Alto compromiso' : goal>=3 ? 'Constante' : 'Casual'; }
+function streakInfo(studentId){
+  const st = state.students.find(x=>x.id===studentId);
+  const keys = Object.keys((st&&st.weekGoals)||{}).sort();
+  const empty = { goal:null, tier:null, days:0, weeks:0, allowance:0, restsUsed:0, weekCount:0, cells:[], metThisWeek:false };
+  if(!keys.length) return empty;
+  const att = {};
+  state.attendance.filter(a=>a.studentId===studentId).forEach(a=>{ att[a.date]=(att[a.date]||0)+1; });
   const today = new Date(); today.setHours(0,0,0,0);
-  const dow = today.getDay(); // 0=domingo
-  const monday = new Date(today); monday.setDate(today.getDate() - ((dow+6)%7));
+  const todayStr = todayLocalStr(today);
+  let d = mondayOf(new Date(keys[0]+'T12:00:00'));
+  let days=0, weeks=0, goal=null, restsUsed=0, weekAtt=0, cells=[];
   const names=['D','L','M','M','J','V','S'];
-  const cells=[];
-  let weekCount=0;
-  for(let i=0;i<7;i++){
-    const d=new Date(monday); d.setDate(monday.getDate()+i);
+  let guard=0;
+  while(todayLocalStr(d)<=todayStr && guard++<800){
     const key=todayLocalStr(d);
-    const isToday = key===todayLocalStr(today);
-    const isFuture = d>today;
-    const n = counts[key]||0;
+    const dow=d.getDay();
+    if(dow===1){ goal=goalForWeek(st,key); restsUsed=0; weekAtt=0; cells=[]; }
+    const n=att[key]||0, isToday=key===todayStr;
+    const allowance = goal==null ? 0 : 7-goal;
     let status;
-    if(n>0){ status='attended'; weekCount++; }
-    else if(d.getDay()===restDay){ status='rest'; }
-    else if(isFuture){ status='future'; }
+    if(n>0){ weekAtt++; status='attended'; if(goal!=null && goal>=MAIN_GOAL_MIN) days++; }
     else if(isToday){ status='pending'; }
-    else { status='missed'; }
-    cells.push({label:names[d.getDay()], status, count:n});
+    else if(goal!=null && restsUsed<allowance){ restsUsed++; if(goal>=MAIN_GOAL_MIN) days++; status='rest'; }
+    else { status='missed'; if(goal!=null && goal>=MAIN_GOAL_MIN) days=0; }
+    if(goal!=null && goal<MAIN_GOAL_MIN){ days=0; }
+    cells.push({label:names[dow], status, count:n});
+    // fin de semana completada (domingo y ya pasó)
+    if(dow===0 && !isToday){ if(goal!=null && weekAtt>=goal) weeks++; else weeks=0; }
+    d.setDate(d.getDate()+1);
   }
-  return { cells, weekCount };
+  // completar la semana actual con días futuros
+  const futureStart = new Date(today); futureStart.setDate(today.getDate()+1);
+  while(cells.length<7){ cells.push({label:names[futureStart.getDay()], status:'future', count:0}); futureStart.setDate(futureStart.getDate()+1); }
+  const met = goal!=null && weekAtt>=goal;
+  return { goal, tier:tierOf(goal), days, weeks: weeks+(met?1:0), allowance: goal==null?0:7-goal, restsUsed, weekCount:weekAtt, cells, metThisWeek:met };
+}
+function goalEditable(st){
+  const hasAny = Object.keys((st&&st.weekGoals)||{}).length>0;
+  return !hasAny || new Date().getDay()===1; // primera vez, o los lunes
+}
+function openGoalPicker(){
+  const st = state.students.find(x=>x.id===state.currentProfile.id) || state.currentProfile;
+  const wk = todayLocalStr(mondayOf(new Date()));
+  const cur = goalForWeek(st, wk);
+  const editable = goalEditable(st);
+  closeModal();
+  const modal=document.createElement('div'); modal.className='overlay';
+  modal.innerHTML=`<div class="sheet">
+    <div class="sheet-head"><h3>Mi meta de la semana</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="s-meta" style="margin-bottom:12px;">¿Cuántos días te propones entrenar esta semana? Los días que no vayas (hasta tu límite de descansos) no rompen tu racha. Solo se puede cambiar los <b>lunes</b>.</div>
+    ${[2,3,4,5,6,7].map(g=>`<button class="btn btn-block ${cur===g?'btn-primary':'btn-ghost'}" style="margin-bottom:8px;" ${editable?'':'disabled'} onclick="saveWeekGoal(${g})">${g} días · ${7-g===0?'sin descansos':(7-g)+(7-g===1?' descanso':' descansos')}</button>`).join('')}
+    ${editable?'':'<div class="s-meta">Tu meta de esta semana ya quedó fijada. Podrás cambiarla el próximo lunes.</div>'}
+  </div>`;
+  document.body.appendChild(modal);
+}
+async function saveWeekGoal(g){
+  const myId = state.currentProfile.id;
+  const wk = todayLocalStr(mondayOf(new Date()));
+  const result = await saveListSafely('students', arr=>{
+    const st = arr.find(x=>x.id===myId); if(!st) return;
+    if(!st.weekGoals) st.weekGoals = {};
+    st.weekGoals[wk] = g;
+  });
+  if(!result) return;
+  closeModal(); render(); showToast('Meta de la semana: '+g+' días');
 }
 function maxSessionsInADay(studentId){
   const counts={};
@@ -911,20 +972,13 @@ const BADGES = [
   {id:'fifty', icon:'🏆', label:'50 clases', test:(total,streak,maxDay)=>total>=50},
   {id:'hundred', icon:'👑', label:'100 clases', test:(total,streak,maxDay)=>total>=100},
 ];
-async function setRestDay(idx, dow){
-  await saveListSafely('students', arr=>{
-    const s = arr.find(x=>x.id===idx); if(!s) return;
-    s.restDay = (s.restDay===dow) ? null : dow;
-  });
-  render();
-}
 function newStudentsByMonth(n){
   const months=lastMonths(n);
   return { labels:months.map(m=>m.label), data:months.map(m=>state.students.filter(s=>s.joinDate && s.joinDate.startsWith(m.key)).length) };
 }
 function incomeByMonth(n){
   const months=lastMonths(n);
-  return { labels:months.map(m=>m.label), data:months.map(m=>state.payments.filter(p=>p.month===m.key && p.status==='pagado').reduce((s,p)=>s+Number(p.amount||0),0)) };
+  return { labels:months.map(m=>m.label), data:months.map(m=>state.payments.filter(p=>p.month===m.key && p.status==='pagado').reduce((s,p)=>s+Number(p.amount||0),0)+(state.incomes||[]).filter(i=>i.month===m.key).reduce((s,i)=>s+Number(i.amount||0),0)) };
 }
 function activeStudentsByMonth(n){
   const months=lastMonths(n);
@@ -1033,7 +1087,8 @@ function renderInicio(c){
   activeStudents().forEach(s=>{ const st=computeLiveStatus(s); if(st==='moroso') morosos++; if(st==='pagado') alDia++; });
   const todayStr=todayLocalStr();
   const hoyAsistencia = state.attendance.filter(a=>a.date===todayStr).length;
-  const ingresosMes = state.payments.filter(p=>p.month===todayKey() && p.status==='pagado').reduce((s,p)=>s+Number(p.amount||0),0);
+  const ingresosMes = state.payments.filter(p=>p.month===todayKey() && p.status==='pagado').reduce((s,p)=>s+Number(p.amount||0),0)
+    + (state.incomes||[]).filter(i=>i.month===todayKey()).reduce((s,i)=>s+Number(i.amount||0),0);
   const gastosMes = state.expenses.filter(e=>e.month===todayKey()).reduce((s,e)=>s+Number(e.amount||0),0);
   const balance = ingresosMes - gastosMes;
   c.innerHTML = `
@@ -1044,16 +1099,26 @@ function renderInicio(c){
       <div class="stat-card ok"><div class="stat-num mono">${alDia}</div><div class="stat-label">Al día este mes</div></div>
       <div class="stat-card"><div class="stat-num mono">${hoyAsistencia}</div><div class="stat-label">Asistencias hoy</div></div>
     </div>
-    <div class="row-2">
-      <div class="stat-card ok"><div class="stat-num mono" style="font-size:20px;">$${ingresosMes.toLocaleString('es-MX')}</div><div class="stat-label">Ingresos del mes</div></div>
-      <div class="stat-card ${balance<0?'alert':''}"><div class="stat-num mono" style="font-size:20px;">$${balance.toLocaleString('es-MX')}</div><div class="stat-label">Balance neto</div></div>
+    <div class="card" style="padding:14px;">
+      <div class="s-meta" style="font-weight:700;margin-bottom:8px;">Finanzas del mes</div>
+      <div class="att-history-item"><span>Ingresos</span><span class="mono" style="font-weight:700;color:var(--ok,#2f6b4f);">$${ingresosMes.toLocaleString('es-MX')}</span></div>
+      <div class="att-history-item"><span>Gastos</span><span class="mono" style="font-weight:700;">−$${gastosMes.toLocaleString('es-MX')}</span></div>
+      <div class="att-history-item" style="border-top:1px solid var(--line,#2a3440);margin-top:4px;padding-top:8px;"><span style="font-weight:700;">Balance neto</span><span class="mono" style="font-weight:800;${balance<0?'color:var(--danger);':''}">$${balance.toLocaleString('es-MX')}</span></div>
     </div>
-    <div class="s-meta" style="text-align:center;margin:-8px 0 16px;">Gastos del mes: $${gastosMes.toLocaleString('es-MX')} · Ajusta en Pagos → Finanzas</div>
-    ${morosos>0?`<div class="card" style="border-color:var(--danger);">
-      <div style="font-weight:700;color:var(--danger);font-size:13px;margin-bottom:8px;">⚠ Alumnos morosos</div>
-      ${activeStudents().filter(s=>computeLiveStatus(s)==='moroso').slice(0,5).map(s=>`
-        <div class="att-history-item"><span>${s.name}</span><span class="status-pill status-moroso">Moroso</span></div>`).join('')}
-    </div>`:''}
+    ${(()=>{
+      const lista=activeStudents().filter(s=>!isExempt(s)).map(s=>({s, st:computeLiveStatus(s)}));
+      const mor=lista.filter(x=>x.st==='moroso'), pag=lista.filter(x=>x.st==='pagado');
+      const row=x=>`<div class="att-history-item" style="cursor:pointer;" onclick="openStudentDetail('${x.s.id}')"><span>${x.s.name}</span><span class="status-pill status-${x.st}">${statusLabel(x.st)}</span></div>`;
+      return `
+      <div class="card" style="${mor.length?'border-color:var(--danger);':''}">
+        <div style="font-weight:700;color:var(--danger);font-size:13px;margin-bottom:8px;">⚠ Morosos (${mor.length})</div>
+        <div class="scroll-list">${mor.length?mor.map(row).join(''):'<div class="s-meta">Nadie debe este mes 🎉</div>'}</div>
+      </div>
+      <div class="card">
+        <div style="font-weight:700;color:var(--ok,#2f6b4f);font-size:13px;margin-bottom:8px;">✓ Ya pagaron (${pag.length})</div>
+        <div class="scroll-list">${pag.length?pag.map(row).join(''):'<div class="s-meta">Aún nadie ha pagado este mes</div>'}</div>
+      </div>`;
+    })()}
     <div class="card">
       <div class="s-meta" style="font-weight:700;margin-bottom:8px;">Ajustes de acceso</div>
       <button class="btn btn-ghost btn-sm btn-block" onclick="openChangePasscode()">Cambiar contraseña de administrador</button>
@@ -1105,8 +1170,20 @@ function renderAlumnos(c){
       ? `<button class="back-link" onclick="state.showArchived=false; render()">← Volver a alumnos</button>`
       : `<div style="text-align:right;margin:-8px 0 10px;"><button class="back-link" onclick="state.showArchived=true; render()" style="margin:0;">🗑 Papelera (${archivedCount})</button></div>`
     }
-    <input class="search-box" placeholder="Buscar alumno…" value="${studentSearch}" oninput="studentSearch=this.value; renderAlumnos(document.getElementById('content'))">
-    ${list.length===0?emptyBlock(showArchived?'Papelera vacía':'Sin alumnos todavía', showArchived?'Los alumnos que archives aparecerán aquí':'Toca + para agregar, o pídeles que se registren ellos mismos'):list.map(s=>{
+    <input class="search-box" placeholder="Buscar alumno…" value="${studentSearch.replace(/"/g,'&quot;')}" oninput="studentSearch=this.value; updateAlumnosList()">
+    <div id="alumnosList">${alumnosListHTML(list, showArchived)}</div>
+  `;
+}
+function updateAlumnosList(){
+  const showArchived=!!state.showArchived;
+  const pool = state.students.filter(s=>showArchived ? s.archived : !s.archived);
+  const norm=t=>(t||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const q=norm(studentSearch);
+  const list = pool.filter(s=>norm(s.name).includes(q) || norm(s.nickname).includes(q));
+  const box=document.getElementById('alumnosList'); if(box) box.innerHTML=alumnosListHTML(list, showArchived);
+}
+function alumnosListHTML(list, showArchived){
+  return `${list.length===0?emptyBlock(showArchived?'Papelera vacía':'Sin alumnos todavía', showArchived?'Los alumnos que archives aparecerán aquí':'Toca + para agregar, o pídeles que se registren ellos mismos'):list.map(s=>{
       const st=computeLiveStatus(s);
       return `<div class="card" style="cursor:pointer;" onclick="openStudentDetail('${s.id}')">
         <div class="student-row">
@@ -1114,8 +1191,7 @@ function renderAlumnos(c){
           <div style="flex:1;"><div class="s-name">${s.name}</div><div class="s-meta">${s.phone||'Sin teléfono'}</div><span class="belt-pill">${s.belt}</span></div>
           ${showArchived?'':`<span class="status-pill status-${st}">${statusLabel(st)}</span>`}
         </div></div>`;
-    }).join('')}
-  `;
+    }).join('')}`;
 }
 /* Herramienta temporal de emergencia: recrea un alumno usando un ID específico (el que
    tenía antes de perderse), para que su asistencia/retos/pagos viejos —que siguen guardados
@@ -1406,13 +1482,21 @@ function renderCobros(){
 function shiftMonth(n){ const d=new Date(state.monthCursor); d.setMonth(d.getMonth()+n); state.monthCursor=d; render(); }
 function renderComprobantesReview(){
   const area=document.getElementById('pagosArea');
-  const list = (state.comprobantes||[]).slice().sort((a,b)=>{
+  const mKey = monthKey(state.monthCursor);
+  const all = state.comprobantes||[];
+  const uploadMonth = cp => cp.created_at ? monthKey(new Date(cp.created_at)) : cp.month;
+  const list = all.filter(cp=>uploadMonth(cp)===mKey).sort((a,b)=>{
     if(a.status==='pendiente' && b.status!=='pendiente') return -1;
     if(a.status!=='pendiente' && b.status==='pendiente') return 1;
     return (b.created_at||'').localeCompare(a.created_at||'');
   });
-  if(list.length===0){ area.innerHTML = emptyBlock('Sin comprobantes','Cuando un alumno suba un comprobante de pago, aparecerá aquí'); return; }
-  area.innerHTML = list.map(cp=>{
+  const pendOtros = all.filter(cp=>cp.status==='pendiente' && uploadMonth(cp)!==mKey).length;
+  const header = monthNavHTML() + `<div class="s-meta" style="margin-bottom:10px;">Comprobantes subidos en ${fmtMonth(state.monthCursor)}: ${list.length}</div>`
+    + (pendOtros>0?`<div class="s-meta" style="margin-bottom:10px;color:var(--danger);">Tienes ${pendOtros} pendiente(s) en otros meses.</div>`:'');
+  if(list.length===0){ area.innerHTML = header + emptyBlock('Sin comprobantes este mes','Cuando un alumno suba un comprobante de pago, aparecerá aquí'); return; }
+  area.innerHTML = header + list.map(cp=>{
+    const upDate = cp.created_at ? new Date(cp.created_at) : null;
+    const upLabel = upDate ? 'Subido el '+upDate.toLocaleDateString('es-MX',{day:'numeric',month:'short'})+', '+upDate.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}) : '';
     const s = state.students.find(x=>x.id===cp.student_id);
     const name = s ? s.name : 'Alumno no encontrado';
     const monthLabel = fmtMonth(new Date(cp.month+'-01T12:00:00'));
@@ -1422,7 +1506,7 @@ function renderComprobantesReview(){
     return `<div class="card">
       <div class="student-row" style="margin-bottom:8px;">
         <div class="avatar">${s&&s.photo?`<img src="${s.photo}">`:initials(name)}</div>
-        <div style="flex:1;"><div class="s-name">${name}</div><div class="s-meta">${monthLabel}</div></div>
+        <div style="flex:1;"><div class="s-name">${name}</div><div class="s-meta">Mensualidad de ${monthLabel}</div>${upLabel?`<div class="s-meta">${upLabel}</div>`:''}</div>
         ${statusPill}
       </div>
       <img src="${cp.photo}" style="width:100%;border-radius:10px;margin-bottom:10px;cursor:pointer;" onclick="openImageLightbox('${cp.photo}')">
@@ -1476,17 +1560,28 @@ async function setPayment(studentId,mKey,status){
 function renderFinanzas(){
   const area=document.getElementById('pagosArea');
   const mKey=monthKey(state.monthCursor);
-  const ingresos = state.payments.filter(p=>p.month===mKey && p.status==='pagado').reduce((s,p)=>s+Number(p.amount||0),0);
+  const ingresosMens = state.payments.filter(p=>p.month===mKey && p.status==='pagado').reduce((s,p)=>s+Number(p.amount||0),0);
+  const extrasMes = (state.incomes||[]).filter(i=>i.month===mKey);
+  const totalExtras = extrasMes.reduce((s,i)=>s+Number(i.amount||0),0);
+  const ingresos = ingresosMens + totalExtras;
   const gastosMes = state.expenses.filter(e=>e.month===mKey);
   const totalGastos = gastosMes.reduce((s,e)=>s+Number(e.amount||0),0);
   const balance = ingresos - totalGastos;
   area.innerHTML=`
     ${monthNavHTML()}
     <div class="stat-grid">
-      <div class="stat-card ok"><div class="stat-num mono" style="font-size:20px;">$${ingresos.toLocaleString('es-MX')}</div><div class="stat-label">Ingresos</div></div>
+      <div class="stat-card ok"><div class="stat-num mono" style="font-size:20px;">$${ingresos.toLocaleString('es-MX')}</div><div class="stat-label">Ingresos${totalExtras?` (mensualidades $${ingresosMens.toLocaleString('es-MX')} + extra $${totalExtras.toLocaleString('es-MX')})`:''}</div></div>
       <div class="stat-card"><div class="stat-num mono" style="font-size:20px;">$${totalGastos.toLocaleString('es-MX')}</div><div class="stat-label">Gastos</div></div>
     </div>
     <div class="stat-card ${balance<0?'alert':'ok'}" style="margin-bottom:16px;"><div class="stat-num mono">$${balance.toLocaleString('es-MX')}</div><div class="stat-label">Balance neto del mes</div></div>
+    <div class="section-head"><h2 style="font-size:15px;">Ingresos extra</h2></div>
+    ${extrasMes.length===0?'<div class="s-meta" style="margin-bottom:8px;">Sin ingresos extra este mes (ventas, seminarios, clases privadas, etc.)</div>':extrasMes.map(i=>`
+    <div class="card"><div class="student-row">
+      <div style="flex:1;"><div class="s-name">${i.concept}</div><div class="s-meta">${i.category||'Otro'}${i.date?' · '+fmtDate(i.date):''}</div></div>
+      <div class="mono" style="font-weight:700;color:var(--ok,#2f6b4f);">+$${Number(i.amount).toLocaleString('es-MX')}</div>
+    </div>
+    <button class="btn btn-danger btn-sm" style="margin-top:8px;" onclick="deleteIncome('${i.id}')">Eliminar</button></div>`).join('')}
+    <button class="btn btn-ghost btn-block" style="margin-bottom:16px;" onclick="openIncomeForm()">+ Agregar ingreso extra</button>
     <div class="section-head"><h2 style="font-size:15px;">Gastos</h2></div>
     ${gastosMes.length===0?emptyBlock('Sin gastos este mes','Toca + para agregar uno'):gastosMes.map(e=>`
     <div class="card"><div class="student-row">
@@ -1496,6 +1591,31 @@ function renderFinanzas(){
     <button class="btn btn-danger btn-sm" style="margin-top:8px;" onclick="deleteExpense('${e.id}')">Eliminar</button></div>`).join('')}
     <button class="btn btn-primary btn-block" style="margin-top:10px;" onclick="openExpenseForm()">+ Agregar gasto</button>
   `;
+}
+function openIncomeForm(){
+  const modal=document.createElement('div'); modal.className='overlay';
+  modal.innerHTML=`<div class="sheet">
+    <div class="sheet-head"><h3>Nuevo ingreso extra</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="field"><label>Concepto</label><input id="i_concept" placeholder="Ej. Venta de playera, seminario…"></div>
+    <div class="field"><label>Monto (MXN)</label><input id="i_amount" type="number" inputmode="decimal" placeholder="0"></div>
+    <div class="field"><label>Tipo</label><select id="i_category"><option>Venta de producto</option><option>Clase privada</option><option>Seminario / evento</option><option>Patrocinio</option><option>Otro</option></select></div>
+    <button class="btn btn-primary btn-block" onclick="saveIncome()">Guardar ingreso</button>
+  </div>`;
+  document.body.appendChild(modal);
+}
+async function saveIncome(){
+  const concept=document.getElementById('i_concept').value.trim();
+  const amount=Number(document.getElementById('i_amount').value);
+  if(!concept || !amount){ showToast('Completa concepto y monto', true); return; }
+  const category=document.getElementById('i_category').value, month=monthKey(state.monthCursor);
+  const result = await saveListSafely('incomes', arr=>arr.push({id:uid(), concept, amount, category, month, date:todayLocalStr()}));
+  if(!result) return;
+  closeModal(); render(); showToast('Ingreso guardado');
+}
+async function deleteIncome(id){
+  if(!confirm('¿Eliminar este ingreso extra?')) return;
+  await saveListSafely('incomes', arr=>{ const idx=arr.findIndex(e=>e.id===id); if(idx>=0) arr.splice(idx,1); });
+  render();
 }
 function openExpenseForm(){
   const modal=document.createElement('div'); modal.className='overlay';
@@ -1538,13 +1658,15 @@ function renderAsistencia(c){
       </select>
     </div>`}
     <div class="tabs-scan-toggle">
-      <button class="${state.asistenciaView!=='qr' && state.asistenciaView!=='pendientes'?'active':''}" onclick="setAsistenciaView('manual')">Manual</button>
+      <button class="${state.asistenciaView!=='qr' && state.asistenciaView!=='pendientes' && state.asistenciaView!=='recuento'?'active':''}" onclick="setAsistenciaView('manual')">Manual</button>
       <button class="${state.asistenciaView==='qr'?'active':''}" onclick="setAsistenciaView('qr')">Escanear QR</button>
       <button class="${state.asistenciaView==='pendientes'?'active':''}" onclick="setAsistenciaView('pendientes')">Pendientes${pendCount>0?' ('+pendCount+')':''}</button>
+      <button class="${state.asistenciaView==='recuento'?'active':''}" onclick="setAsistenciaView('recuento')">Recuento</button>
     </div>
     <div id="attArea"></div>`;
   if(state.asistenciaView==='qr') renderScanArea();
   else if(state.asistenciaView==='pendientes') renderAsistenciaPendientesAdmin();
+  else if(state.asistenciaView==='recuento') renderRecuentoAsistencia();
   else renderManualAttendance();
 }
 function setAsistenciaView(v){
@@ -1577,13 +1699,17 @@ function renderManualAttendance(){
 }
 function renderAsistenciaPendientesAdmin(){
   const area=document.getElementById('attArea');
-  const list = (state.asistenciaPendiente||[]).slice().sort((a,b)=>{
+  const mKey = monthKey(state.monthCursor);
+  const todas = state.asistenciaPendiente||[];
+  const list = todas.filter(ap=>(ap.date||'').startsWith(mKey)).sort((a,b)=>{
     if(a.status==='pendiente' && b.status!=='pendiente') return -1;
     if(a.status!=='pendiente' && b.status==='pendiente') return 1;
     return (b.created_at||'').localeCompare(a.created_at||'');
   });
-  if(list.length===0){ area.innerHTML = emptyBlock('Sin solicitudes','Cuando un alumno reporte una asistencia olvidada, aparecerá aquí'); return; }
-  area.innerHTML = list.map(ap=>{
+  const pendOtros = todas.filter(ap=>ap.status==='pendiente' && !(ap.date||'').startsWith(mKey)).length;
+  const header = monthNavHTML() + (pendOtros>0?`<div class="s-meta" style="margin-bottom:10px;color:var(--danger);">Tienes ${pendOtros} pendiente(s) en otros meses.</div>`:'');
+  if(list.length===0){ area.innerHTML = header + emptyBlock('Sin solicitudes este mes','Cuando un alumno reporte una asistencia, aparecerá aquí'); return; }
+  area.innerHTML = header + list.map(ap=>{
     const s = state.students.find(x=>x.id===ap.student_id);
     const name = s ? s.name : 'Alumno no encontrado';
     const statusPill = ap.status==='pendiente' ? '<span class="status-pill status-pendiente">Pendiente</span>'
@@ -1602,6 +1728,54 @@ function renderAsistenciaPendientesAdmin(){
       </div>` : ''}
     </div>`;
   }).join('');
+}
+function weekStartStr(){
+  const t=new Date(); t.setHours(0,0,0,0); t.setDate(t.getDate()-((t.getDay()+6)%7)); return todayLocalStr(t);
+}
+function renderRecuentoAsistencia(){
+  const area=document.getElementById('attArea');
+  const mKey = monthKey(state.monthCursor);
+  const isCur = mKey===todayKey();
+  const today = todayLocalStr(), wk = weekStartStr();
+  const dayPick = state.recuentoDay || today;
+  const rows = activeStudents().map(st=>{
+    const mine = state.attendance.filter(a=>a.studentId===st.id);
+    const mes = mine.filter(a=>a.date.startsWith(mKey)).length;
+    const dias = new Set(mine.filter(a=>a.date.startsWith(mKey)).map(a=>a.date)).size;
+    const sem = mine.filter(a=>a.date>=wk && a.date<=today).length;
+    const hoy = mine.filter(a=>a.date===today).length;
+    return { st, mes, dias, sem, hoy, info: streakInfo(st.id) };
+  }).sort((a,b)=>b.mes-a.mes);
+  const total = rows.reduce((t,r)=>t+r.mes,0);
+  const sinAsistir = rows.filter(r=>r.mes===0).length;
+  const delDia = state.attendance.filter(a=>a.date===dayPick);
+  const topRachas = rows.filter(r=>r.info.tier==='principal' && r.info.days>0).sort((a,b)=>b.info.days-a.info.days).slice(0,5);
+  const topConst = rows.filter(r=>r.info.tier==='constancia' && r.info.weeks>0).sort((a,b)=>b.info.weeks-a.info.weeks).slice(0,5);
+  const sinMeta = rows.filter(r=>r.info.goal==null).length;
+  area.innerHTML = monthNavHTML() + `
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-num mono">${total}</div><div class="stat-label">Asistencias del mes</div></div>
+      <div class="stat-card ${sinAsistir>0?'alert':''}"><div class="stat-num mono">${sinAsistir}</div><div class="stat-label">Sin asistir este mes</div></div>
+    </div>
+    ${topRachas.length?`<div class="card"><div class="s-meta" style="font-weight:700;margin-bottom:6px;">🔥 Racha principal — meta de 5+ días (para premiar)</div>
+      ${topRachas.map((r,i)=>`<div class="att-history-item"><span>${i+1}. ${r.st.name} <span class="s-meta">(meta ${r.info.goal})</span></span><span class="mono" style="font-weight:700;">${r.info.days} días</span></div>`).join('')}</div>`:''}
+    ${topConst.length?`<div class="card"><div class="s-meta" style="font-weight:700;margin-bottom:6px;">📅 Constancia — meta de 4 días o menos</div>
+      ${topConst.map((r,i)=>`<div class="att-history-item"><span>${i+1}. ${r.st.name} <span class="s-meta">(meta ${r.info.goal})</span></span><span class="mono" style="font-weight:700;">${r.info.weeks} sem.</span></div>`).join('')}</div>`:''}
+    ${sinMeta>0?`<div class="s-meta" style="margin-bottom:8px;">${sinMeta} alumno(s) aún no definen su meta semanal.</div>`:''}
+    <div class="card">
+      <div class="s-meta" style="font-weight:700;margin-bottom:6px;">Asistentes por día</div>
+      <input type="date" value="${dayPick}" onchange="state.recuentoDay=this.value; renderRecuentoAsistencia()" style="margin-bottom:8px;">
+      ${delDia.length===0?'<div class="s-meta">Nadie registrado ese día</div>':delDia.map(a=>{ const st=state.students.find(x=>x.id===a.studentId); return `<div class="att-history-item"><span>${st?st.name:'—'}</span><span>${a.className||''}</span></div>`; }).join('')}
+      <div class="s-meta" style="margin-top:6px;">Total: ${delDia.length}</div>
+    </div>
+    <div class="s-meta" style="margin:6px 0;">Por alumno (mes de ${fmtMonth(state.monthCursor)}). Sem = esta semana, Hoy = hoy. Meta = días por semana que se propuso (grupo entre paréntesis, solo lo ves tú).</div>
+    ${rows.map(r=>`<div class="card"><div class="student-row">
+      <div class="avatar">${r.st.photo?`<img src="${r.st.photo}">`:initials(r.st.name)}</div>
+      <div style="flex:1;"><div class="s-name">${r.st.name}</div>
+        <div class="s-meta">Mes: <b>${r.mes}</b> clases (${r.dias} días)${isCur?` · Sem: <b>${r.sem}</b> · Hoy: <b>${r.hoy}</b>`:''}</div>
+        <div class="s-meta">${r.info.goal==null?'Sin meta definida':`Meta: <b>${r.info.goal}</b>/sem (${tierLabel(r.info.goal)}) · Esta semana: <b>${r.info.weekCount}</b>${r.info.tier==='principal'?` · Descansos usados: ${r.info.restsUsed}/${r.info.allowance}`:''}`}</div>
+        <div class="s-meta">${r.info.tier==='principal'?`🔥 Racha: ${r.info.days} días`:r.info.tier==='constancia'?`📅 Constancia: ${r.info.weeks} semanas`:'—'}</div>
+      </div></div></div>`).join('')}`;
 }
 async function aprobarAsistenciaPendiente(id, studentId, date, className){
   const yaExiste = state.attendance.some(a=>a.studentId===studentId && a.date===date && a.className===className);
@@ -1736,10 +1910,7 @@ function renderMuroAdmin(c){
       <div class="card post-card"><div class="post-type">${p.type}</div><div class="s-name" style="margin-top:3px;">${p.title}</div>
       ${p.photo?`<img src="${p.photo}" style="width:100%;border-radius:10px;margin-top:8px;">`:''}
       <div class="s-meta" style="margin-top:4px;">${p.body}</div><div class="s-meta" style="margin-top:6px;">${fmtDate(p.date)}</div>
-      <div class="reaction-row">
-        <span class="reaction-count">👍 ${(p.reactions&&p.reactions.likes||[]).length} me gusta</span>
-        <span class="reaction-count">✅ ${(p.reactions&&p.reactions.asistire||[]).length} asistirán</span>
-      </div>
+      ${postSocialHTML(p, 'admin', true)}
       <button class="btn btn-danger btn-sm" style="margin-top:8px;" onclick="deletePost('${p.id}')">Eliminar</button></div>`).join('')}
     <div class="section-head" style="margin-top:20px;"><h2 style="font-size:16px;">Buzón de comentarios</h2><span class="s-meta">${state.comments.length}</span></div>
     ${state.comments.length===0?emptyBlock('Sin comentarios','Aquí verás lo que escriban los alumnos'):state.comments.slice().reverse().map(cm=>`
@@ -1954,10 +2125,13 @@ function renderPerfilAlumno(c){
   const hist = mine.slice().sort((a,b)=>b.date.localeCompare(a.date)).slice(0,8);
   const age = ageFromDOB(s.birthDate);
   const titleList = (s.titles||'').split('\n').map(t=>t.trim()).filter(Boolean);
-  const restDay = (s.restDay===0||s.restDay) ? s.restDay : null;
-  const streak = computeStreak(s.id, restDay);
+  const info = streakInfo(s.id);
+  const streak = info.days;
+  const mainTier = info.tier!=='constancia';
+  const bigNum = mainTier ? info.days : info.weeks;
+  const bigLabel = info.goal==null ? 'Define tu meta para empezar tu racha' : mainTier ? (bigNum===1?'día de racha':'días de racha') : (bigNum===1?'semana cumplida seguida':'semanas cumplidas seguidas');
   const maxDay = maxSessionsInADay(s.id);
-  const week = currentWeekStatus(s.id, restDay);
+  const week = { cells: info.cells };
   const dayLetters=[['D',0],['L',1],['M',2],['M',3],['J',4],['V',5],['S',6]];
   const range = state.profileChartRange || 6;
   c.innerHTML=`
@@ -1995,16 +2169,15 @@ function renderPerfilAlumno(c){
     ${retosBadgesFor(s.id).length?`<div class="card">${retosBadgesFor(s.id).map(b=>`<div class="att-history-item"><span>${b}</span></div>`).join('')}</div>`:''}
 
     <div class="streak-card">
-      <span class="streak-flame">${streak>0?'🔥':'🥋'}</span>
-      <div class="streak-num">${streak}</div>
-      <div class="streak-label">${streak===1?'día de racha':'días de racha'}</div>
+      <span class="streak-flame">${bigNum>0?'🔥':'🥋'}</span>
+      <div class="streak-num">${bigNum}</div>
+      <div class="streak-label">${bigLabel}</div>
       <div class="week-strip">
         ${week.cells.map(cell=>`<div class="week-cell ${cell.status}"><div class="wd">${cell.label}</div><div class="box">${cell.status==='attended'?(cell.count>1?'×'+cell.count:'✓'):cell.status==='rest'?'☾':''}</div></div>`).join('')}
       </div>
-      <div class="restday-row">
-        ${dayLetters.map(([l,d])=>`<button class="restday-btn ${restDay===d?'active':''}" onclick="setRestDay('${s.id}',${d})">${l}</button>`).join('')}
-      </div>
-      <div class="restday-hint">Toca un día para marcarlo como tu descanso semanal</div>
+      <button class="btn btn-sm" style="margin-top:14px;background:var(--petrol-light);color:#fff;" onclick="openReportarAsistencia()">✅ Registrar mi asistencia de hoy</button>
+      <div class="restday-hint" style="margin-top:10px;">${info.goal==null?'Aún no defines tu meta semanal':`Meta de la semana: ${info.goal} días · Llevas ${info.weekCount}${info.goal<MAIN_GOAL_MIN?'':` · Descansos: ${info.restsUsed}/${info.allowance}`}`}</div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:6px;color:#fff;border-color:rgba(255,255,255,.3);" onclick="openGoalPicker()">🎯 ${info.goal==null?'Definir mi meta semanal':'Mi meta de la semana'}</button>
     </div>
 
     <div class="stat-grid">
@@ -2151,22 +2324,79 @@ async function toggleKudos(id){
 }
 
 /* ============ MURO ALUMNO ============ */
+function namesOf(ids){
+  return (ids||[]).map(id=>{ const st=state.students.find(x=>x.id===id); return st ? (st.nickname || st.name.split(' ')[0]) : null; }).filter(Boolean);
+}
+function peopleChips(ids, emptyText){
+  const n = namesOf(ids);
+  return n.length ? n.join(', ') : emptyText;
+}
+function commentsHTML(p, canDelete){
+  const cms = p.comments||[];
+  return cms.length===0 ? '<div class="s-meta">Sin comentarios todavía</div>' : cms.map(cm=>{
+    const st=state.students.find(x=>x.id===cm.authorId);
+    const nm = cm.authorId==='admin' ? 'Academia' : (st ? (st.nickname||st.name) : cm.authorName||'Alumno');
+    const mine = state.auth==='student' && state.currentProfile && cm.authorId===state.currentProfile.id;
+    return `<div class="att-history-item" style="align-items:flex-start;"><span><b>${nm}</b> <span class="s-meta">· ${fmtDate(cm.date)}</span><br>${String(cm.text).replace(/</g,'&lt;')}</span>${(canDelete||mine)?`<button class="close-x" style="font-size:14px;" onclick="deletePostComment('${p.id}','${cm.id}')">✕</button>`:''}</div>`;
+  }).join('');
+}
+function postSocialHTML(p, myId, isAdmin){
+  const likes=(p.reactions&&p.reactions.likes)||[]; const asis=(p.reactions&&p.reactions.asistire)||[];
+  const iLiked=likes.includes(myId), iAsis=asis.includes(myId);
+  const n=(p.comments||[]).length;
+  return `
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      <button class="btn btn-sm ${iLiked?'btn-primary':'btn-ghost'}" style="flex:1;" ${isAdmin?'disabled':''} onclick="toggleReaction('${p.id}','likes')">👍 Me gusta (${likes.length})</button>
+      <button class="btn btn-sm ${iAsis?'btn-primary':'btn-ghost'}" style="flex:1;" ${isAdmin?'disabled':''} onclick="toggleReaction('${p.id}','asistire')">✅ Asistiré (${asis.length})</button>
+    </div>
+    <div class="s-meta" style="margin-top:8px;"><b>A quién le gusta:</b> ${peopleChips(likes,'Nadie aún')}</div>
+    <div class="s-meta" style="margin-top:4px;"><b>Asistirán:</b> ${peopleChips(asis,'Nadie aún')}</div>
+    <details style="margin-top:10px;" ${state.openComments&&state.openComments[p.id]?'open':''} ontoggle="(state.openComments=state.openComments||{})['${p.id}']=this.open">
+      <summary style="font-weight:700;font-size:13px;cursor:pointer;">💬 Comentarios (${n})</summary>
+      <div style="margin-top:8px;">${commentsHTML(p, isAdmin)}</div>
+      <div style="display:flex;gap:6px;margin-top:8px;">
+        <input id="pc_${p.id}" placeholder="Escribe un comentario…" style="flex:1;">
+        <button class="btn btn-sm btn-primary" onclick="addPostComment('${p.id}')">Enviar</button>
+      </div>
+    </details>`;
+}
 function renderMuroAlumno(c){
   const myId = state.currentProfile.id;
   c.innerHTML=`
     <div class="section-head"><h2>Muro</h2></div><div class="section-underline"></div>
     ${state.posts.length===0?emptyBlock('Nada publicado aún','Aquí verás torneos y promociones'):state.posts.slice().reverse().map(p=>{
-      const likes=(p.reactions&&p.reactions.likes)||[]; const asis=(p.reactions&&p.reactions.asistire)||[];
-      const iLiked=likes.includes(myId), iAsis=asis.includes(myId);
       return `<div class="card post-card"><div class="post-type">${p.type}</div><div class="s-name" style="margin-top:3px;">${p.title}</div>
       ${p.photo?`<img src="${p.photo}" style="width:100%;border-radius:10px;margin-top:8px;">`:''}
       <div class="s-meta" style="margin-top:4px;">${p.body}</div><div class="s-meta" style="margin-top:6px;">${fmtDate(p.date)}</div>
-      <div style="display:flex;gap:8px;margin-top:10px;">
-        <button class="btn btn-sm ${iLiked?'btn-primary':'btn-ghost'}" style="flex:1;" onclick="toggleReaction('${p.id}','likes')">👍 Me gusta (${likes.length})</button>
-        <button class="btn btn-sm ${iAsis?'btn-primary':'btn-ghost'}" style="flex:1;" onclick="toggleReaction('${p.id}','asistire')">✅ Asistiré (${asis.length})</button>
-      </div>
+      ${postSocialHTML(p, myId, false)}
     </div>`;}).join('')}
   `;
+}
+async function addPostComment(postId){
+  const input=document.getElementById('pc_'+postId); const text=(input&&input.value||'').trim();
+  if(!text){ showToast('Escribe algo primero', true); return; }
+  const isAdmin = state.auth==='admin';
+  const authorId = isAdmin ? 'admin' : state.currentProfile.id;
+  const authorName = isAdmin ? 'Academia' : state.currentProfile.name;
+  state.openComments = state.openComments||{}; state.openComments[postId]=true;
+  const result = await saveListSafely('posts', arr=>{
+    const p=arr.find(x=>x.id===postId); if(!p) return;
+    if(!p.comments) p.comments=[];
+    p.comments.push({id:uid(), authorId, authorName, text:text.slice(0,500), date:todayLocalStr()});
+  });
+  if(!result) return;
+  render(); showToast('Comentario publicado');
+  const post = (state.posts||[]).find(x=>x.id===postId);
+  if(!isAdmin) enviarNotificacion('admin','admin','muro','Nuevo comentario en el muro 💬', authorName+': '+text.slice(0,80), '/');
+}
+async function deletePostComment(postId, cid){
+  if(!confirm('¿Eliminar este comentario?')) return;
+  state.openComments = state.openComments||{}; state.openComments[postId]=true;
+  await saveListSafely('posts', arr=>{
+    const p=arr.find(x=>x.id===postId); if(!p||!p.comments) return;
+    const i=p.comments.findIndex(x=>x.id===cid); if(i>=0) p.comments.splice(i,1);
+  });
+  render();
 }
 async function toggleReaction(postId, kind){
   const myId = state.currentProfile.id;
@@ -2563,6 +2793,7 @@ async function refreshCurrentView(silent){
    que cerrar y volver a abrir la app por completo. */
 document.addEventListener('visibilitychange', ()=>{
   if(document.visibilityState==='visible' && state.loaded && (state.auth==='admin' || state.auth==='student')){
+    if(!state._lastPushSync || Date.now()-state._lastPushSync>600000){ state._lastPushSync=Date.now(); resyncNotificaciones(); }
     refreshCurrentView(true);
   }
 });
